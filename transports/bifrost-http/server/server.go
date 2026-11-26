@@ -2830,6 +2830,15 @@ func (s *BifrostHTTPServer) vectorStoreSettings(name string) (retentionDays, max
 	return settings.RetentionDays, settings.MaxSizeMB
 }
 
+// warpVectorStores is the configured stores, from which Warp takes the one config.json names
+// for its log index, or nil (not a typed nil) when config.json configures none.
+func (s *BifrostHTTPServer) warpVectorStores() warp.VectorStoreResolver {
+	if s.Config == nil || s.Config.VectorStores == nil {
+		return nil
+	}
+	return s.Config.VectorStores
+}
+
 // primaryVectorStoreName is the name of the store a consumer that selects none
 // uses, "" when no vector_store is configured.
 func (s *BifrostHTTPServer) primaryVectorStoreName() string {
@@ -3338,6 +3347,8 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 		ExternalQuotaBudgets: s.ExternalQuotaBudgetResolver,
 		VirtualKeyAssignees:  s.VirtualKeyAssigneeResolver,
 		UserGovernance:       s.WarpUserGovernanceReader,
+		VectorStores:         s.warpVectorStores(),
+		VectorStoreName:      s.Config.WarpVectorStore(),
 		CallerRestriction:    s.WarpCallerRestrictionResolver,
 	})
 	if err != nil {
@@ -3350,8 +3361,12 @@ func (s *BifrostHTTPServer) RegisterAPIRoutes(ctx context.Context, callbacks Ser
 	s.subscribeCaptureDeletes(loggerPlugin)
 	// Read at each sweep rather than once: the cleaner is built in Bootstrap,
 	// after this, and both retentions can change at runtime. Warp's log index is
-	// in the primary store.
-	s.WarpHandler.Service().SetVectorRetention(s.vectorRetentionDaysFor(s.primaryVectorStoreName()))
+	// in the store config.json names for it, the primary one when it names none.
+	warpStore := s.Config.WarpVectorStore()
+	if warpStore == "" {
+		warpStore = s.primaryVectorStoreName()
+	}
+	s.WarpHandler.Service().SetVectorRetention(s.vectorRetentionDaysFor(warpStore))
 	// config.json's warp section saves through the service, so it is validated and provisions its
 	// vector namespace exactly like a save from the settings page.
 	s.Config.ApplyWarpFileConfig(s.Ctx, s.WarpHandler.Service())

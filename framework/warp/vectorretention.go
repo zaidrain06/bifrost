@@ -48,7 +48,21 @@ func (s *Service) ForgetLogs(ctx context.Context, ids []string) {
 	s.mu.RLock()
 	vectors := s.vectorStore
 	s.mu.RUnlock()
-	if vectors == nil || len(ids) == 0 {
+	if len(ids) == 0 {
+		return
+	}
+	if vectors == nil {
+		// The store config.json names could not be used at startup but still holds the index:
+		// the deletes wait for a start that reaches it.
+		if unreachable := s.unreachableVectorStore(); unreachable != nil {
+			if view, err := s.ConfigView(ctx); err == nil && view.EmbeddingModel != "" {
+				failed := make([]logstore.WarpVectorDelete, 0, len(ids))
+				for _, id := range ids {
+					failed = append(failed, logstore.WarpVectorDelete{LogID: id, Namespace: view.LogVectorStoreNamespace})
+				}
+				s.recordVectorDeletes(ctx, failed, unreachable)
+			}
+		}
 		return
 	}
 	// The stored namespace, whether or not Warp is switched on: a log deleted
