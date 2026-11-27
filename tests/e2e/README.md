@@ -85,7 +85,6 @@ tests/e2e/
     ├── logs/                     # LLM logs tests
     ├── mcp-logs/                 # MCP logs tests
     ├── mcp-registry/             # MCP registry tests
-    ├── routing-rules/            # Routing rules tests
     ├── plugins/                  # Plugins tests
     ├── observability/            # Observability connectors tests
     └── config/                   # Config settings tests

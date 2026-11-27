@@ -389,15 +389,13 @@ function expandScenario(sc) {
   // provider delete follows it); jumping straight to the provider delete would
   // skip the VK and leak it.
   const hasVkScenario = sc.steps.some((s) => s.type === "createVK");
-  const hasRuleScenario = sc.steps.some((s) => s.type === "createRule");
-  const cleanupRule = `cleanup: delete routing rule [${sid}]`;
   // A scenario may create several model routers, each under its own ref ("r1", "r2"). A router's id
   // and name are the same run-scoped string, and every router created is deleted in the teardown,
   // before the virtual key and the providers its targets name.
   const routerRefs = [...new Set(sc.steps.filter((s) => s.type === "createRouter").map((s) => s.ref || "r1"))];
   const routerIdSeg = (ref) => `catwiring-rtr-${sid}-${ref || "r1"}-{{run_id}}`;
   const cleanupRouter = (ref) => `cleanup: delete model router ${ref} [${sid}]`;
-  const cleanupTarget = hasRuleScenario ? cleanupRule : routerRefs.length ? cleanupRouter(routerRefs[0]) : hasVkScenario ? cleanupVk : cleanupProvider;
+  const cleanupTarget = routerRefs.length ? cleanupRouter(routerRefs[0]) : hasVkScenario ? cleanupVk : cleanupProvider;
   // A scenario may stand up more than one provider (e.g. governance LB across
   // providers). ref "self" is the scenario's primary provider; any other ref
   // gets its own run-scoped name. All created providers are torn down.
@@ -590,35 +588,16 @@ function expandScenario(sc) {
           events(pollPrerequest(step.waitSeconds), pollTest(name, lines, cleanupTarget))));
         break;
       }
-      case "createRule": {
-        // A global routing rule. Its CEL expression should match only this run's own model, so the
-        // rule cannot route another scenario's requests. Targets and fallbacks name providers by ref.
-        const name = uniq(step.label);
-        const body = {
-          name: `catwiring-rt-${sid}-{{run_id}}`,
-          cel_expression: step.cel,
-          targets: step.targets.map((tg) => ({ provider: nameOf(tg.providerRef), model: tg.model, weight: tg.weight ?? 1 })),
-          fallbacks: (step.fallbacks || []).map((f) => `${nameOf(f.providerRef)}/${f.model}`),
-          scope: "global",
-        };
-        const exec = [
-          `var cleanupReq = ${JSON.stringify(cleanupTarget)};`,
-          `pm.test(${JSON.stringify(name)}, function () { pm.expect([200, 201], 'status ' + pm.response.code + ' body ' + pm.response.text()).to.include(pm.response.code); });`,
-          "if (pm.response.code === 200 || pm.response.code === 201) {",
-          `  pm.collectionVariables.set('ruleid_${sid}', ((pm.response.json() || {}).rule || {}).id || '');`,
-          "} else { pm.execution.setNextRequest(cleanupReq); }",
-        ];
-        items.push(item(nextId("create-rule"), name, request("POST", url(["api", "governance", "routing-rules"]), body), events(null, exec)));
-        break;
-      }
       case "createRouter": {
         // A model router in the global scope, on and taking the requests cel holds for. Its condition
         // should match only this run's own model, so it cannot take another scenario's requests. It
         // is a conditional router unless the step names a mode; a classifier router's settings come
-        // from step.classifier, a function of the provider names. Targets and their fallbacks name
+        // from step.classifier, a function of the provider names. Targets and fallbacks name
         // providers by ref, a classifier router's targets also name a tier, and a target with no
-        // providerRef and no model keeps the request's own. Targets are saved on their own endpoint,
-        // as the dashboard saves them.
+        // providerRef and no model keeps the request's own. A conditional router's fallbacks are the
+        // step's own, one list for whichever target is chosen; a classifier router's are on its
+        // targets. Targets are saved on their own endpoint, with the router's fallbacks, as the
+        // dashboard saves them.
         const ref = step.ref || "r1";
         const name = uniq(step.label);
         const routing = { enabled: true, scope: "global", cel_expression: step.cel, priority: step.priority ?? 0 };
@@ -641,9 +620,10 @@ function expandScenario(sc) {
             weight: tg.weight ?? 1,
             ...(tg.fallbacks ? { fallbacks: tg.fallbacks.map((f) => `${nameOf(f.providerRef)}/${f.model}`) } : {}),
           }));
+          const fallbacks = step.fallbacks ? { fallbacks: step.fallbacks.map((f) => `${nameOf(f.providerRef)}/${f.model}`) } : {};
           const tname = uniq(`set the targets of router ${ref}`);
           items.push(item(nextId("router-targets"), tname,
-            request("PUT", url(["api", "routing", "model-routers", routerIdSeg(ref), "targets"]), { targets }),
+            request("PUT", url(["api", "routing", "model-routers", routerIdSeg(ref), "targets"]), { targets, ...fallbacks }),
             events(null, mutationTest(tname, [200], cleanupTarget))));
         }
         break;
@@ -828,11 +808,6 @@ function expandScenario(sc) {
   }
 
   const cleanupItems = [];
-  if (hasRuleScenario) {
-    cleanupItems.push(item(`rt-${sid}-cleanup-rule`, cleanupRule,
-      request("DELETE", url(["api", "governance", "routing-rules", `{{ruleid_${sid}}}`]), null),
-      events(null, cleanupTest(cleanupRule))));
-  }
   for (const ref of routerRefs) {
     cleanupItems.push(item(`rt-${sid}-cleanup-router-${ref}`, cleanupRouter(ref),
       request("DELETE", url(["api", "routing", "model-routers", routerIdSeg(ref)]), null),
@@ -1241,17 +1216,17 @@ const SCENARIOS = [
     ],
   },
   {
-    id: "rule-fallback-to-deleted-provider",
-    title: "A rule fallback whose provider was deleted is skipped with a trail warning",
-    description: "A rule matching this run's own alias targets A, whose key OpenAI refuses, with fallbacks [C, B]. C is deleted after the rule is saved. The request's trail warns that the C fallback does not name a known provider, and B serves as fallback 1.",
+    id: "router-fallback-to-deleted-provider",
+    title: "A router fallback whose provider was deleted is skipped with a trail warning",
+    description: "A conditional router matching this run's own alias targets A, whose key OpenAI refuses, with fallbacks [C, B]. C is deleted after the router is saved. The request's trail warns that the C fallback does not name a known provider, and B serves as fallback 1.",
     steps: [
       { type: "addProvider", ref: "self", keys: [key({ id: "kbad", models: ["catwiring-rr16-{{run_id}}"], aliases: { "catwiring-rr16-{{run_id}}": MODEL_B }, badKey: true })] },
       { type: "addProvider", ref: "b", keys: [key({ id: "kb", models: ["catwiring-rr16-{{run_id}}"], aliases: { "catwiring-rr16-{{run_id}}": MODEL_B } })] },
       { type: "addProvider", ref: "c", keys: [key({ id: "kc", models: ["catwiring-rr16-{{run_id}}"], aliases: { "catwiring-rr16-{{run_id}}": MODEL_B } })] },
-      { type: "createRule", cel: "model == 'catwiring-rr16-{{run_id}}'", targets: [{ providerRef: "self", model: "catwiring-rr16-{{run_id}}" }], fallbacks: [{ providerRef: "c", model: "catwiring-rr16-{{run_id}}" }, { providerRef: "b", model: "catwiring-rr16-{{run_id}}" }], label: "create the rule: A, fallbacks [C, B]" },
-      { type: "deleteProvider", ref: "c", label: "delete provider C after saving the rule" },
-      { type: "route", model: "catwiring-rr16-{{run_id}}", bareModel: true, useVk: false, requestId: true, expectStatus: 200, expectProviderOneOf: ["b"], expectIsFallback: true, expectPrimaryProviderRef: "self", label: "the rule's A fails; B serves" },
-      { type: "assertRoutingTrail", fromRequest: true, expectSubstrings: ["fallback \"catwiring-rt-rule-fallback-to-deleted-provider-c-{{run_id}}/catwiring-rr16-{{run_id}}\" skipped: it does not name a known provider"], waitSeconds: 2, label: "trail: the deleted C fallback is skipped with a warning" },
+      { type: "createRouter", cel: "model == 'catwiring-rr16-{{run_id}}'", targets: [{ providerRef: "self", model: "catwiring-rr16-{{run_id}}" }], fallbacks: [{ providerRef: "c", model: "catwiring-rr16-{{run_id}}" }, { providerRef: "b", model: "catwiring-rr16-{{run_id}}" }], label: "create the router: A, fallbacks [C, B]" },
+      { type: "deleteProvider", ref: "c", label: "delete provider C after saving the router" },
+      { type: "route", model: "catwiring-rr16-{{run_id}}", bareModel: true, useVk: false, requestId: true, expectStatus: 200, expectProviderOneOf: ["b"], expectIsFallback: true, expectPrimaryProviderRef: "self", label: "the router's A fails; B serves" },
+      { type: "assertRoutingTrail", fromRequest: true, expectSubstrings: ["fallback \"catwiring-rt-router-fallback-to-deleted-provider-c-{{run_id}}/catwiring-rr16-{{run_id}}\" skipped: it does not name a known provider"], waitSeconds: 2, label: "trail: the deleted C fallback is skipped with a warning" },
       { type: "assertFallbackRow", providerRef: "b", fallbackIndex: 1, expectStatus: "success", waitSeconds: 0, label: "B served as fallback 1" },
       { type: "cleanup" },
     ],
@@ -1443,7 +1418,7 @@ const SCENARIOS = [
   {
     id: "router-no-target-passes-on",
     title: "A conditional model router with no target passes the request to the next router",
-    description: "Two conditional routers take this run's own model. The first has no target, so it passes the request on, as a routing rule with no target does; the second sends it to B. The trail shows the first router passing the request on and the second choosing.",
+    description: "Two conditional routers take this run's own model. The first has no target, so it passes the request on; the second sends it to B. The trail shows the first router passing the request on and the second choosing.",
     steps: [
       { type: "addProvider", ref: "self", keys: [key({ id: "ka", models: ["catwiring-mr02-{{run_id}}"], aliases: { "catwiring-mr02-{{run_id}}": MODEL_B } })] },
       { type: "addProvider", ref: "b", keys: [key({ id: "kb", models: ["catwiring-mr02-{{run_id}}"], aliases: { "catwiring-mr02-{{run_id}}": MODEL_B } })] },
@@ -1475,7 +1450,7 @@ const SCENARIOS = [
     steps: [
       { type: "addProvider", ref: "self", keys: [key({ id: "kbad", models: ["catwiring-mr04-{{run_id}}"], aliases: { "catwiring-mr04-{{run_id}}": MODEL_B }, badKey: true })] },
       { type: "addProvider", ref: "b", keys: [key({ id: "kb", models: ["catwiring-mr04-{{run_id}}"], aliases: { "catwiring-mr04-{{run_id}}": MODEL_B } })] },
-      { type: "createRouter", ref: "r1", cel: "model == 'catwiring-mr04-{{run_id}}'", targets: [{ fallbacks: [{ providerRef: "b", model: "catwiring-mr04-{{run_id}}" }] }], label: "create the router: keep the request's provider and model, fall back to B" },
+      { type: "createRouter", ref: "r1", cel: "model == 'catwiring-mr04-{{run_id}}'", targets: [{}], fallbacks: [{ providerRef: "b", model: "catwiring-mr04-{{run_id}}" }], label: "create the router: keep the request's provider and model, fall back to B" },
       { type: "route", model: "catwiring-mr04-{{run_id}}", useVk: false, requestId: true, expectStatus: 200, expectProviderOneOf: ["b"], expectIsFallback: true, expectPrimaryProviderRef: "self", label: "A fails; B serves as the router's fallback" },
       { type: "assertRoutingTrail", fromRequest: true, expectSubstrings: ["Model router 'catwiring-rtr-router-keeps-model-adds-fallbacks-r1-{{run_id}}' → provider=catwiring-rt-router-keeps-model-adds-fallbacks-{{run_id}}, model=catwiring-mr04-{{run_id}}"], waitSeconds: 2, label: "trail: the router kept the provider the caller named" },
       { type: "assertFallbackRow", providerRef: "b", fallbackIndex: 1, expectStatus: "success", waitSeconds: 0, label: "B served as fallback 1" },

@@ -125,46 +125,6 @@ function test(name, fn) {
 
 const SPA_FALLBACK = "<!doctype html><html><body>bifrost</body></html>";
 
-// ── Governance - Complexity Analyzer / Update Complexity Analyzer Config ──────
-const complexityPrerequest = scriptFor(
-  "Governance - Complexity Analyzer / Update Complexity Analyzer Config",
-  "prerequest",
-);
-
-test("complexity prerequest skips when the config variable was never captured", () => {
-  const ctx = run(complexityPrerequest, { variables: { complexity_config_json: "" } });
-  assert.strictEqual(ctx.state.skipped, true, "expected skipRequest()");
-});
-
-test("complexity prerequest skips when the captured body is not JSON", () => {
-  const ctx = run(complexityPrerequest, {
-    variables: { complexity_config_json: SPA_FALLBACK },
-  });
-  assert.strictEqual(ctx.state.skipped, true, "expected skipRequest()");
-});
-
-test("complexity prerequest skips when the config has no keywords object", () => {
-  const ctx = run(complexityPrerequest, {
-    variables: { complexity_config_json: JSON.stringify({ tier_boundaries: {} }) },
-  });
-  assert.strictEqual(ctx.state.skipped, true, "expected skipRequest()");
-});
-
-test("complexity prerequest still injects e2eprobe into a valid config", () => {
-  const ctx = run(complexityPrerequest, {
-    variables: {
-      complexity_config_json: JSON.stringify({
-        tier_boundaries: { simple: 1 },
-        keywords: { simple_keywords: ["hi"] },
-      }),
-    },
-  });
-  assert.strictEqual(ctx.state.skipped, false, "should not skip a valid config");
-  const body = JSON.parse(ctx.pm.request.body.raw);
-  assert.deepStrictEqual(body.keywords.simple_keywords, ["hi", "e2eprobe"]);
-  assert.deepStrictEqual(body.tier_boundaries, { simple: 1 });
-});
-
 // ── Skills / Upload Skill File ────────────────────────────────────────────────
 const uploadTest = scriptFor("Skills / Upload Skill File", "test");
 

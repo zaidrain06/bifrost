@@ -11,7 +11,6 @@ import { VirtualKeysManagementPage } from "../../features/virtual-keys/pages/vir
 import { DashboardPage } from "../../features/dashboard/pages/dashboard.page";
 import { LogsPage } from "../../features/logs/pages/logs.page";
 import { MCPLogsPage } from "../../features/mcp-logs/pages/mcp-logs.page";
-import { RoutingRulesPage } from "../../features/routing-rules/pages/routing-rules.page";
 import { MCPRegistryPage } from "../../features/mcp-registry/pages/mcp-registry.page";
 import { RelaysPage } from "../../features/relays/pages/relays.page";
 import { RelayLogsPage } from "../../features/relay-logs/pages/relay-logs.page";
@@ -42,7 +41,6 @@ type BifrostFixtures = {
 	dashboardPage: DashboardPage;
 	logsPage: LogsPage;
 	mcpLogsPage: MCPLogsPage;
-	routingRulesPage: RoutingRulesPage;
 	mcpRegistryPage: MCPRegistryPage;
 	pluginsPage: PluginsPage;
 	relaysPage: RelaysPage;
@@ -202,11 +200,6 @@ export const test = base.extend<BifrostFixtures>({
 	mcpLogsPage: async ({ page }, use) => {
 		await use(new MCPLogsPage(page));
 	},
-
-	routingRulesPage: async ({ page }, use) => {
-		await use(new RoutingRulesPage(page));
-	},
-
 
 	mcpRegistryPage: async ({ page }, use) => {
 		await use(new MCPRegistryPage(page));

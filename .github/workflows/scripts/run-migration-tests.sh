@@ -6310,7 +6310,10 @@ compare_postgres_snapshots() {
   # migrate_virtual_key_governance_to_model_configs) create wildcard model-config rows from provider/VK
   # governance, so the row count grows by design (e.g. seed 2 -> 5). The migration-added rows have random
   # UUID ids; the seeded model-config-migration-test-* rows must survive unchanged.
-  local rowcount_grow_tables="governance_model_configs"
+  # model_routers, model_router_targets: routing_rules_to_model_routers makes model routers of every
+  # stored routing rule, so a version that already has these tables gains the routers made from the
+  # seeded rule-migration-test-* rules. Neither table is seeded, so there are no rows to compare.
+  local rowcount_grow_tables="governance_model_configs model_routers model_router_targets"
 
   # Tables intentionally removed by migrations — their disappearance is by design,
   # not data loss. The four oauth_per_user_* tables backed the Bifrost-as-OAuth-server

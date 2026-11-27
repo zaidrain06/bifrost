@@ -2,17 +2,41 @@ package lib
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
 
+	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/framework/configstore"
 	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/plugins/routing/rules"
 	"gorm.io/gorm"
 )
+
+// defaultConditionalRoutersOn turns on each conditional router of config.json
+// whose routing does not say enabled, as a routing rule that did not say it
+// was on. section is the model_routers list as written, which is the only
+// place a routing that leaves enabled out can be told from one that says
+// false. A classifier router stays off until its routing turns it on.
+func defaultConditionalRoutersOn(section json.RawMessage, routers []configstore.ModelRouter) {
+	var written []struct {
+		Routing *struct {
+			Enabled *bool `json:"enabled"`
+		} `json:"routing"`
+	}
+	if json.Unmarshal(section, &written) != nil || len(written) != len(routers) {
+		return
+	}
+	for i := range routers {
+		conditional := strings.EqualFold(strings.TrimSpace(routers[i].Mode), configstoreTables.ModelRouterModeConditional)
+		if conditional && routers[i].Routing != nil && written[i].Routing != nil && written[i].Routing.Enabled == nil {
+			routers[i].Routing.Enabled = true
+		}
+	}
+}
 
 // fileModelRouters validates config.json's model_routers entries and returns
 // the valid ones, keeping the first valid declaration of an id and skipping,
@@ -45,8 +69,8 @@ type declaredModelRouter struct {
 }
 
 // fileModelRouter validates one config.json router and returns it normalized,
-// with its section hashes, the targets and routing it declares, and its
-// identity hash, plus the config as written for the split-mode merge. A
+// with its section hashes, the targets, fallbacks and routing it declares, and
+// its identity hash, plus the config as written for the split-mode merge. A
 // conditional router classifies nothing, so an entry in that mode has no
 // classifier settings to check: any it writes are dropped, as the store drops
 // them.
@@ -69,6 +93,10 @@ func fileModelRouter(entry configstore.ModelRouter) (router configstore.ModelRou
 			return configstore.ModelRouter{}, nil, false
 		}
 	}
+	if err := configstore.ValidateModelRouterFallbacks(entry.Mode, entry.Fallbacks); err != nil {
+		logger.Error("invalid fallbacks for model router %q in config file: %v", entry.ID, err)
+		return configstore.ModelRouter{}, nil, false
+	}
 	if entry.Routing != nil {
 		routing := *entry.Routing
 		if err := configstore.ValidateModelRouterRouting(&routing); err != nil {
@@ -89,15 +117,16 @@ func fileModelRouter(entry configstore.ModelRouter) (router configstore.ModelRou
 		OriginRuleID:             entry.OriginRuleID,
 		ComplexityAnalyzerConfig: *normalized,
 		Targets:                  entry.Targets,
+		Fallbacks:                entry.Fallbacks,
 		Routing:                  entry.Routing,
 		ConfigHash:               configstore.GenerateModelRouterHash(entry),
 	}, asWritten, true
 }
 
 // resolveModelRouterKeyNames replaces the provider_key_name of each target,
-// and of each target fallback, with the key_id of that provider's key, as a
-// routing rule's targets and fallbacks are resolved at load, so only the
-// key_id is stored.
+// of each target fallback and of each of the router's own fallbacks with the
+// key_id of that provider's key, as a routing rule's targets and fallbacks are
+// resolved at load, so only the key_id is stored.
 func resolveModelRouterKeyNames(ctx context.Context, store configstore.ConfigStore, router *configstore.ModelRouter) error {
 	named := false
 	for _, target := range router.Targets {
@@ -105,6 +134,9 @@ func resolveModelRouterKeyNames(ctx context.Context, store configstore.ConfigSto
 		for _, fallback := range target.ParsedFallbacks {
 			named = named || fallback.ProviderKeyName != nil
 		}
+	}
+	for _, fallback := range router.Fallbacks {
+		named = named || fallback.ProviderKeyName != nil
 	}
 	if !named {
 		return nil
@@ -134,31 +166,41 @@ func resolveModelRouterKeyNames(ctx context.Context, store configstore.ConfigSto
 				}
 				target.KeyID = &keyID
 			}
-			for j := range router.Targets[i].ParsedFallbacks {
-				fallback := &router.Targets[i].ParsedFallbacks[j]
-				keyName := ""
-				if fallback.ProviderKeyName != nil {
-					keyName = strings.TrimSpace(*fallback.ProviderKeyName)
-				}
-				fallback.ProviderKeyName = nil
-				if keyName == "" {
-					continue
-				}
-				if strings.TrimSpace(fallback.KeyID) != "" {
-					return fmt.Errorf("targets[%d].fallbacks[%d] cannot set key_id together with provider_key_name", i, j)
-				}
-				if strings.TrimSpace(string(fallback.Provider)) == "" {
-					return fmt.Errorf("targets[%d].fallbacks[%d] provider_key_name requires provider to be set", i, j)
-				}
-				keyID, err := modelRouterFallbackKeyID(ctx, tx, string(fallback.Provider), keyName)
-				if err != nil {
-					return fmt.Errorf("targets[%d].fallbacks[%d] provider_key_name resolution failed: %w", i, j, err)
-				}
-				fallback.KeyID = keyID
+			if err := resolveModelRouterFallbackKeyNames(ctx, tx, target.ParsedFallbacks, fmt.Sprintf("targets[%d].fallbacks", i)); err != nil {
+				return err
 			}
 		}
-		return nil
+		return resolveModelRouterFallbackKeyNames(ctx, tx, router.Fallbacks, "fallbacks")
 	})
+}
+
+// resolveModelRouterFallbackKeyNames replaces the provider_key_name of each
+// fallback in a chain with that key's id. where names the chain in an error:
+// a target's, or the router's own.
+func resolveModelRouterFallbackKeyNames(ctx context.Context, tx *gorm.DB, fallbacks []configstoreTables.RoutingFallback, where string) error {
+	for j := range fallbacks {
+		fallback := &fallbacks[j]
+		keyName := ""
+		if fallback.ProviderKeyName != nil {
+			keyName = strings.TrimSpace(*fallback.ProviderKeyName)
+		}
+		fallback.ProviderKeyName = nil
+		if keyName == "" {
+			continue
+		}
+		if strings.TrimSpace(fallback.KeyID) != "" {
+			return fmt.Errorf("%s[%d] cannot set key_id together with provider_key_name", where, j)
+		}
+		if strings.TrimSpace(string(fallback.Provider)) == "" {
+			return fmt.Errorf("%s[%d] provider_key_name requires provider to be set", where, j)
+		}
+		keyID, err := modelRouterFallbackKeyID(ctx, tx, string(fallback.Provider), keyName)
+		if err != nil {
+			return fmt.Errorf("%s[%d] provider_key_name resolution failed: %w", where, j, err)
+		}
+		fallback.KeyID = keyID
+	}
+	return nil
 }
 
 // modelRouterFallbackKeyID looks up the key_id of the provider's key named
@@ -194,6 +236,25 @@ func syncModelRouterTargetsFromFile(ctx context.Context, config *Config, id stri
 	}
 	if err := config.ConfigStore.SetModelRouterTargets(ctx, id, declared); err != nil {
 		logger.Error("failed to sync targets of model router %q from config file; a later boot retries them: %v", id, err)
+		return false
+	}
+	return true
+}
+
+// syncModelRouterFallbacksFromFile applies a config.json conditional router's
+// fallback chain on the terms its targets are applied on: the entry declares
+// it, it should win, and it differs from the stored chain. An entry without
+// fallbacks leaves the stored chain alone, and an empty list clears it. It
+// reports false when the write failed.
+func syncModelRouterFallbacksFromFile(ctx context.Context, config *Config, id string, declared, stored []configstoreTables.RoutingFallback, entryChanged, sourceOfTruth bool) bool {
+	if declared == nil || (!entryChanged && !sourceOfTruth) {
+		return true
+	}
+	if configstore.ModelRouterFallbacksHash(declared) == configstore.ModelRouterFallbacksHash(stored) {
+		return true
+	}
+	if err := config.ConfigStore.SetModelRouterFallbacks(ctx, id, declared); err != nil {
+		logger.Error("failed to sync fallbacks of model router %q from config file; a later boot retries them: %v", id, err)
 		return false
 	}
 	return true
@@ -453,6 +514,32 @@ func modelRouterScopeResolves(ctx context.Context, store configstore.ConfigStore
 // recorded only once they are written, as other config.json loaders advance a
 // hash only for what they applied, so a targets or routing write that fails
 // is retried by the next boot.
+// routersMadeFromRoutingRules returns the stored routers the upgrade made from routing rules: one
+// that carries a rule as its origin, or has the id of a rule that is still stored. The rules are
+// kept for a release after they stopped routing, which is what tells these routers apart. When the
+// rules cannot be read, every router counts, so none is deleted on a guess.
+func routersMadeFromRoutingRules(ctx context.Context, store configstore.ConfigStore, stored []configstore.ModelRouter) map[string]bool {
+	fromRules := make(map[string]bool, len(stored))
+	rules, err := store.GetRoutingRules(ctx)
+	if err != nil {
+		logger.Error("failed to read routing rules for the model routers config file sync, so no undeclared router is deleted: %v", err)
+		for _, router := range stored {
+			fromRules[router.ID] = true
+		}
+		return fromRules
+	}
+	ruleIDs := make(map[string]bool, len(rules))
+	for _, rule := range rules {
+		ruleIDs[rule.ID] = true
+	}
+	for _, router := range stored {
+		if router.OriginRuleID != "" || ruleIDs[router.ID] {
+			fromRules[router.ID] = true
+		}
+	}
+	return fromRules
+}
+
 func syncModelRoutersFromFile(ctx context.Context, config *Config, configData *ConfigData) {
 	if config != nil && config.boot != nil && configData != nil {
 		config.boot.modelRouters = configData.ModelRouters
@@ -463,6 +550,14 @@ func syncModelRoutersFromFile(ctx context.Context, config *Config, configData *C
 	if config.ConfigStore == nil {
 		logger.Warn("config file declares model_routers, but there is no config store to keep them; skipping")
 		return
+	}
+	// A target's fallback may name a custom provider, and one is known only once the live store
+	// has loaded it, which is after this check. The providers this boot loads are made known first,
+	// so a router that falls back to one is not refused as naming no provider.
+	if config.boot != nil {
+		for provider := range config.boot.providers {
+			schemas.RegisterKnownProvider(provider)
+		}
 	}
 	declared := fileModelRouters(configData)
 
@@ -487,8 +582,16 @@ func syncModelRoutersFromFile(ctx context.Context, config *Config, configData *C
 			// not delete the router it meant to configure.
 			keep[strings.TrimSpace(entry.ID)] = true
 		}
+		fromRules := routersMadeFromRoutingRules(ctx, config.ConfigStore, stored)
 		for _, router := range stored {
 			if keep[router.ID] {
+				continue
+			}
+			if fromRules[router.ID] {
+				// The upgrade made this router from a routing rule, after the file was written.
+				// Deleting it would drop routing the gateway had, so it stays until the file
+				// declares it or it is deleted by hand.
+				logger.Warn("model router %q was made from a routing rule and is not in the config file; it is kept. Declare it under model_routers, or delete it, to make the file the source of truth for it", router.ID)
 				continue
 			}
 			if err := config.ConfigStore.DeleteModelRouter(ctx, router.ID); err != nil && !errors.Is(err, configstore.ErrNotFound) {
@@ -561,10 +664,10 @@ func syncModelRoutersFromFile(ctx context.Context, config *Config, configData *C
 				next.Name, next.Description, next.ConfigHash = c.router.Name, c.router.Description, c.router.ConfigHash
 			}
 		}
-		// Targets and routing are applied on their own below, so a router is
-		// created with the default routing and its routing set after.
-		next.Targets, next.Routing = current.Targets, current.Routing
-		applied, waits := next, (c.writeRouting || c.router.Targets != nil) && next.ConfigHash != current.ConfigHash
+		// Targets, fallbacks and routing are applied on their own below, so a
+		// router is created with the default routing and its routing set after.
+		next.Targets, next.Fallbacks, next.Routing = current.Targets, current.Fallbacks, current.Routing
+		applied, waits := next, (c.writeRouting || c.router.Targets != nil || c.router.Fallbacks != nil) && next.ConfigHash != current.ConfigHash
 		if waits {
 			next.ConfigHash = current.ConfigHash
 		}
@@ -574,7 +677,10 @@ func syncModelRoutersFromFile(ctx context.Context, config *Config, configData *C
 				err = config.ConfigStore.UpdateModelRouter(ctx, &next)
 			}
 		} else {
-			next.Routing = &configstore.ModelRouterRouting{Scope: "global", Priority: nextGlobal}
+			// An entry with routing of its own is created off and gets that routing next. One
+			// without is on when it is conditional, as the store's default routing is.
+			next.Routing = &configstore.ModelRouterRouting{Scope: "global", Priority: nextGlobal,
+				Enabled: c.router.Routing == nil && next.Mode == configstoreTables.ModelRouterModeConditional}
 			err = config.ConfigStore.CreateModelRouter(ctx, &next)
 			if errors.Is(err, configstore.ErrModelRouterPriorityTaken) {
 				// A row this version cannot read is not in the stored list, so
@@ -605,6 +711,9 @@ func syncModelRoutersFromFile(ctx context.Context, config *Config, configData *C
 			awaitingRouter[c.router.ID] = applied
 		}
 		if !syncModelRouterTargetsFromFile(ctx, config, c.router.ID, c.router.Targets, current.Targets, c.entryChanged, sourceOfTruth) {
+			targetsFailed[c.router.ID] = true
+		}
+		if !syncModelRouterFallbacksFromFile(ctx, config, c.router.ID, c.router.Fallbacks, current.Fallbacks, c.entryChanged, sourceOfTruth) {
 			targetsFailed[c.router.ID] = true
 		}
 		if c.writeRouting {

@@ -19584,12 +19584,12 @@
       ]
     },
     {
-      "name": "A rule fallback whose provider was deleted is skipped with a trail warning",
-      "description": "A rule matching this run's own alias targets A, whose key OpenAI refuses, with fallbacks [C, B]. C is deleted after the rule is saved. The request's trail warns that the C fallback does not name a known provider, and B serves as fallback 1.",
+      "name": "A router fallback whose provider was deleted is skipped with a trail warning",
+      "description": "A conditional router matching this run's own alias targets A, whose key OpenAI refuses, with fallbacks [C, B]. C is deleted after the router is saved. The request's trail warns that the C fallback does not name a known provider, and B serves as fallback 1.",
       "item": [
         {
-          "id": "rt-rule-fallback-to-deleted-provider-01-add-provider",
-          "name": "01. add provider [rule-fallback-to-deleted-provider]",
+          "id": "rt-router-fallback-to-deleted-provider-01-add-provider",
+          "name": "01. add provider [router-fallback-to-deleted-provider]",
           "event": [
             {
               "listen": "test",
@@ -19597,8 +19597,8 @@
                 "type": "text/javascript",
                 "exec": [
                   "var acceptable = [200,201];",
-                  "var cleanupReq = \"cleanup: delete routing rule [rule-fallback-to-deleted-provider]\";",
-                  "pm.test(\"01. add provider [rule-fallback-to-deleted-provider]\", function () {",
+                  "var cleanupReq = \"cleanup: delete model router r1 [router-fallback-to-deleted-provider]\";",
+                  "pm.test(\"01. add provider [router-fallback-to-deleted-provider]\", function () {",
                   "  pm.expect(acceptable, 'status ' + pm.response.code + ' body ' + pm.response.text()).to.include(pm.response.code);",
                   "});",
                   "if (acceptable.indexOf(pm.response.code) < 0) { pm.execution.setNextRequest(cleanupReq); }"
@@ -19626,13 +19626,13 @@
             },
             "body": {
               "mode": "raw",
-              "raw": "{\"provider\":\"catwiring-rt-rule-fallback-to-deleted-provider-{{run_id}}\",\"custom_provider_config\":{\"base_provider_type\":\"openai\",\"is_key_less\":false}}"
+              "raw": "{\"provider\":\"catwiring-rt-router-fallback-to-deleted-provider-{{run_id}}\",\"custom_provider_config\":{\"base_provider_type\":\"openai\",\"is_key_less\":false}}"
             }
           }
         },
         {
-          "id": "rt-rule-fallback-to-deleted-provider-02-add-key",
-          "name": "02. add key kbad [rule-fallback-to-deleted-provider]",
+          "id": "rt-router-fallback-to-deleted-provider-02-add-key",
+          "name": "02. add key kbad [router-fallback-to-deleted-provider]",
           "event": [
             {
               "listen": "test",
@@ -19640,8 +19640,8 @@
                 "type": "text/javascript",
                 "exec": [
                   "var acceptable = [200,201];",
-                  "var cleanupReq = \"cleanup: delete routing rule [rule-fallback-to-deleted-provider]\";",
-                  "pm.test(\"02. add key kbad [rule-fallback-to-deleted-provider]\", function () {",
+                  "var cleanupReq = \"cleanup: delete model router r1 [router-fallback-to-deleted-provider]\";",
+                  "pm.test(\"02. add key kbad [router-fallback-to-deleted-provider]\", function () {",
                   "  pm.expect(acceptable, 'status ' + pm.response.code + ' body ' + pm.response.text()).to.include(pm.response.code);",
                   "});",
                   "if (acceptable.indexOf(pm.response.code) < 0) { pm.execution.setNextRequest(cleanupReq); }"
@@ -19658,26 +19658,26 @@
               }
             ],
             "url": {
-              "raw": "{{base_url}}/api/providers/catwiring-rt-rule-fallback-to-deleted-provider-{{run_id}}/keys",
+              "raw": "{{base_url}}/api/providers/catwiring-rt-router-fallback-to-deleted-provider-{{run_id}}/keys",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
                 "api",
                 "providers",
-                "catwiring-rt-rule-fallback-to-deleted-provider-{{run_id}}",
+                "catwiring-rt-router-fallback-to-deleted-provider-{{run_id}}",
                 "keys"
               ]
             },
             "body": {
               "mode": "raw",
-              "raw": "{\"id\":\"kbad-{{run_id}}\",\"name\":\"catwiring-rt-rule-fallback-to-deleted-provider-kbad-{{run_id}}\",\"models\":[\"catwiring-rr16-{{run_id}}\"],\"enabled\":true,\"value\":\"sk-deadbeef-invalid-000\",\"aliases\":{\"catwiring-rr16-{{run_id}}\":\"gpt-4o-mini\"}}"
+              "raw": "{\"id\":\"kbad-{{run_id}}\",\"name\":\"catwiring-rt-router-fallback-to-deleted-provider-kbad-{{run_id}}\",\"models\":[\"catwiring-rr16-{{run_id}}\"],\"enabled\":true,\"value\":\"sk-deadbeef-invalid-000\",\"aliases\":{\"catwiring-rr16-{{run_id}}\":\"gpt-4o-mini\"}}"
             }
           }
         },
         {
-          "id": "rt-rule-fallback-to-deleted-provider-03-add-provider",
-          "name": "03. add provider (b) [rule-fallback-to-deleted-provider]",
+          "id": "rt-router-fallback-to-deleted-provider-03-add-provider",
+          "name": "03. add provider (b) [router-fallback-to-deleted-provider]",
           "event": [
             {
               "listen": "test",
@@ -19685,8 +19685,8 @@
                 "type": "text/javascript",
                 "exec": [
                   "var acceptable = [200,201];",
-                  "var cleanupReq = \"cleanup: delete routing rule [rule-fallback-to-deleted-provider]\";",
-                  "pm.test(\"03. add provider (b) [rule-fallback-to-deleted-provider]\", function () {",
+                  "var cleanupReq = \"cleanup: delete model router r1 [router-fallback-to-deleted-provider]\";",
+                  "pm.test(\"03. add provider (b) [router-fallback-to-deleted-provider]\", function () {",
                   "  pm.expect(acceptable, 'status ' + pm.response.code + ' body ' + pm.response.text()).to.include(pm.response.code);",
                   "});",
                   "if (acceptable.indexOf(pm.response.code) < 0) { pm.execution.setNextRequest(cleanupReq); }"
@@ -19714,13 +19714,13 @@
             },
             "body": {
               "mode": "raw",
-              "raw": "{\"provider\":\"catwiring-rt-rule-fallback-to-deleted-provider-b-{{run_id}}\",\"custom_provider_config\":{\"base_provider_type\":\"openai\",\"is_key_less\":false}}"
+              "raw": "{\"provider\":\"catwiring-rt-router-fallback-to-deleted-provider-b-{{run_id}}\",\"custom_provider_config\":{\"base_provider_type\":\"openai\",\"is_key_less\":false}}"
             }
           }
         },
         {
-          "id": "rt-rule-fallback-to-deleted-provider-04-add-key",
-          "name": "04. add key kb (b) [rule-fallback-to-deleted-provider]",
+          "id": "rt-router-fallback-to-deleted-provider-04-add-key",
+          "name": "04. add key kb (b) [router-fallback-to-deleted-provider]",
           "event": [
             {
               "listen": "test",
@@ -19728,8 +19728,8 @@
                 "type": "text/javascript",
                 "exec": [
                   "var acceptable = [200,201];",
-                  "var cleanupReq = \"cleanup: delete routing rule [rule-fallback-to-deleted-provider]\";",
-                  "pm.test(\"04. add key kb (b) [rule-fallback-to-deleted-provider]\", function () {",
+                  "var cleanupReq = \"cleanup: delete model router r1 [router-fallback-to-deleted-provider]\";",
+                  "pm.test(\"04. add key kb (b) [router-fallback-to-deleted-provider]\", function () {",
                   "  pm.expect(acceptable, 'status ' + pm.response.code + ' body ' + pm.response.text()).to.include(pm.response.code);",
                   "});",
                   "if (acceptable.indexOf(pm.response.code) < 0) { pm.execution.setNextRequest(cleanupReq); }"
@@ -19746,26 +19746,26 @@
               }
             ],
             "url": {
-              "raw": "{{base_url}}/api/providers/catwiring-rt-rule-fallback-to-deleted-provider-b-{{run_id}}/keys",
+              "raw": "{{base_url}}/api/providers/catwiring-rt-router-fallback-to-deleted-provider-b-{{run_id}}/keys",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
                 "api",
                 "providers",
-                "catwiring-rt-rule-fallback-to-deleted-provider-b-{{run_id}}",
+                "catwiring-rt-router-fallback-to-deleted-provider-b-{{run_id}}",
                 "keys"
               ]
             },
             "body": {
               "mode": "raw",
-              "raw": "{\"id\":\"kb-{{run_id}}\",\"name\":\"catwiring-rt-rule-fallback-to-deleted-provider-kb-{{run_id}}\",\"models\":[\"catwiring-rr16-{{run_id}}\"],\"enabled\":true,\"value\":\"env.OPENAI_API_KEY\",\"aliases\":{\"catwiring-rr16-{{run_id}}\":\"gpt-4o-mini\"}}"
+              "raw": "{\"id\":\"kb-{{run_id}}\",\"name\":\"catwiring-rt-router-fallback-to-deleted-provider-kb-{{run_id}}\",\"models\":[\"catwiring-rr16-{{run_id}}\"],\"enabled\":true,\"value\":\"env.OPENAI_API_KEY\",\"aliases\":{\"catwiring-rr16-{{run_id}}\":\"gpt-4o-mini\"}}"
             }
           }
         },
         {
-          "id": "rt-rule-fallback-to-deleted-provider-05-add-provider",
-          "name": "05. add provider (c) [rule-fallback-to-deleted-provider]",
+          "id": "rt-router-fallback-to-deleted-provider-05-add-provider",
+          "name": "05. add provider (c) [router-fallback-to-deleted-provider]",
           "event": [
             {
               "listen": "test",
@@ -19773,8 +19773,8 @@
                 "type": "text/javascript",
                 "exec": [
                   "var acceptable = [200,201];",
-                  "var cleanupReq = \"cleanup: delete routing rule [rule-fallback-to-deleted-provider]\";",
-                  "pm.test(\"05. add provider (c) [rule-fallback-to-deleted-provider]\", function () {",
+                  "var cleanupReq = \"cleanup: delete model router r1 [router-fallback-to-deleted-provider]\";",
+                  "pm.test(\"05. add provider (c) [router-fallback-to-deleted-provider]\", function () {",
                   "  pm.expect(acceptable, 'status ' + pm.response.code + ' body ' + pm.response.text()).to.include(pm.response.code);",
                   "});",
                   "if (acceptable.indexOf(pm.response.code) < 0) { pm.execution.setNextRequest(cleanupReq); }"
@@ -19802,13 +19802,13 @@
             },
             "body": {
               "mode": "raw",
-              "raw": "{\"provider\":\"catwiring-rt-rule-fallback-to-deleted-provider-c-{{run_id}}\",\"custom_provider_config\":{\"base_provider_type\":\"openai\",\"is_key_less\":false}}"
+              "raw": "{\"provider\":\"catwiring-rt-router-fallback-to-deleted-provider-c-{{run_id}}\",\"custom_provider_config\":{\"base_provider_type\":\"openai\",\"is_key_less\":false}}"
             }
           }
         },
         {
-          "id": "rt-rule-fallback-to-deleted-provider-06-add-key",
-          "name": "06. add key kc (c) [rule-fallback-to-deleted-provider]",
+          "id": "rt-router-fallback-to-deleted-provider-06-add-key",
+          "name": "06. add key kc (c) [router-fallback-to-deleted-provider]",
           "event": [
             {
               "listen": "test",
@@ -19816,8 +19816,8 @@
                 "type": "text/javascript",
                 "exec": [
                   "var acceptable = [200,201];",
-                  "var cleanupReq = \"cleanup: delete routing rule [rule-fallback-to-deleted-provider]\";",
-                  "pm.test(\"06. add key kc (c) [rule-fallback-to-deleted-provider]\", function () {",
+                  "var cleanupReq = \"cleanup: delete model router r1 [router-fallback-to-deleted-provider]\";",
+                  "pm.test(\"06. add key kc (c) [router-fallback-to-deleted-provider]\", function () {",
                   "  pm.expect(acceptable, 'status ' + pm.response.code + ' body ' + pm.response.text()).to.include(pm.response.code);",
                   "});",
                   "if (acceptable.indexOf(pm.response.code) < 0) { pm.execution.setNextRequest(cleanupReq); }"
@@ -19834,37 +19834,38 @@
               }
             ],
             "url": {
-              "raw": "{{base_url}}/api/providers/catwiring-rt-rule-fallback-to-deleted-provider-c-{{run_id}}/keys",
+              "raw": "{{base_url}}/api/providers/catwiring-rt-router-fallback-to-deleted-provider-c-{{run_id}}/keys",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
                 "api",
                 "providers",
-                "catwiring-rt-rule-fallback-to-deleted-provider-c-{{run_id}}",
+                "catwiring-rt-router-fallback-to-deleted-provider-c-{{run_id}}",
                 "keys"
               ]
             },
             "body": {
               "mode": "raw",
-              "raw": "{\"id\":\"kc-{{run_id}}\",\"name\":\"catwiring-rt-rule-fallback-to-deleted-provider-kc-{{run_id}}\",\"models\":[\"catwiring-rr16-{{run_id}}\"],\"enabled\":true,\"value\":\"env.OPENAI_API_KEY\",\"aliases\":{\"catwiring-rr16-{{run_id}}\":\"gpt-4o-mini\"}}"
+              "raw": "{\"id\":\"kc-{{run_id}}\",\"name\":\"catwiring-rt-router-fallback-to-deleted-provider-kc-{{run_id}}\",\"models\":[\"catwiring-rr16-{{run_id}}\"],\"enabled\":true,\"value\":\"env.OPENAI_API_KEY\",\"aliases\":{\"catwiring-rr16-{{run_id}}\":\"gpt-4o-mini\"}}"
             }
           }
         },
         {
-          "id": "rt-rule-fallback-to-deleted-provider-07-create-rule",
-          "name": "07. create the rule: A, fallbacks [C, B] [rule-fallback-to-deleted-provider]",
+          "id": "rt-router-fallback-to-deleted-provider-07-create-router",
+          "name": "07. create the router: A, fallbacks [C, B] [router-fallback-to-deleted-provider]",
           "event": [
             {
               "listen": "test",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "var cleanupReq = \"cleanup: delete routing rule [rule-fallback-to-deleted-provider]\";",
-                  "pm.test(\"07. create the rule: A, fallbacks [C, B] [rule-fallback-to-deleted-provider]\", function () { pm.expect([200, 201], 'status ' + pm.response.code + ' body ' + pm.response.text()).to.include(pm.response.code); });",
-                  "if (pm.response.code === 200 || pm.response.code === 201) {",
-                  "  pm.collectionVariables.set('ruleid_rule-fallback-to-deleted-provider', ((pm.response.json() || {}).rule || {}).id || '');",
-                  "} else { pm.execution.setNextRequest(cleanupReq); }"
+                  "var acceptable = [200,201];",
+                  "var cleanupReq = \"cleanup: delete model router r1 [router-fallback-to-deleted-provider]\";",
+                  "pm.test(\"07. create the router: A, fallbacks [C, B] [router-fallback-to-deleted-provider]\", function () {",
+                  "  pm.expect(acceptable, 'status ' + pm.response.code + ' body ' + pm.response.text()).to.include(pm.response.code);",
+                  "});",
+                  "if (acceptable.indexOf(pm.response.code) < 0) { pm.execution.setNextRequest(cleanupReq); }"
                 ]
               }
             }
@@ -19878,25 +19879,71 @@
               }
             ],
             "url": {
-              "raw": "{{base_url}}/api/governance/routing-rules",
+              "raw": "{{base_url}}/api/routing/model-routers",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
                 "api",
-                "governance",
-                "routing-rules"
+                "routing",
+                "model-routers"
               ]
             },
             "body": {
               "mode": "raw",
-              "raw": "{\"name\":\"catwiring-rt-rule-fallback-to-deleted-provider-{{run_id}}\",\"cel_expression\":\"model == 'catwiring-rr16-{{run_id}}'\",\"targets\":[{\"provider\":\"catwiring-rt-rule-fallback-to-deleted-provider-{{run_id}}\",\"model\":\"catwiring-rr16-{{run_id}}\",\"weight\":1}],\"fallbacks\":[\"catwiring-rt-rule-fallback-to-deleted-provider-c-{{run_id}}/catwiring-rr16-{{run_id}}\",\"catwiring-rt-rule-fallback-to-deleted-provider-b-{{run_id}}/catwiring-rr16-{{run_id}}\"],\"scope\":\"global\"}"
+              "raw": "{\"id\":\"catwiring-rtr-router-fallback-to-deleted-provider-r1-{{run_id}}\",\"name\":\"catwiring-rtr-router-fallback-to-deleted-provider-r1-{{run_id}}\",\"mode\":\"conditional\",\"routing\":{\"enabled\":true,\"scope\":\"global\",\"cel_expression\":\"model == 'catwiring-rr16-{{run_id}}'\",\"priority\":0}}"
             }
           }
         },
         {
-          "id": "rt-rule-fallback-to-deleted-provider-08-delete-provider",
-          "name": "08. delete provider C after saving the rule [rule-fallback-to-deleted-provider]",
+          "id": "rt-router-fallback-to-deleted-provider-08-router-targets",
+          "name": "08. set the targets of router r1 [router-fallback-to-deleted-provider]",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "var acceptable = [200];",
+                  "var cleanupReq = \"cleanup: delete model router r1 [router-fallback-to-deleted-provider]\";",
+                  "pm.test(\"08. set the targets of router r1 [router-fallback-to-deleted-provider]\", function () {",
+                  "  pm.expect(acceptable, 'status ' + pm.response.code + ' body ' + pm.response.text()).to.include(pm.response.code);",
+                  "});",
+                  "if (acceptable.indexOf(pm.response.code) < 0) { pm.execution.setNextRequest(cleanupReq); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/routing/model-routers/catwiring-rtr-router-fallback-to-deleted-provider-r1-{{run_id}}/targets",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "routing",
+                "model-routers",
+                "catwiring-rtr-router-fallback-to-deleted-provider-r1-{{run_id}}",
+                "targets"
+              ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"targets\":[{\"provider\":\"catwiring-rt-router-fallback-to-deleted-provider-{{run_id}}\",\"model\":\"catwiring-rr16-{{run_id}}\",\"weight\":1}],\"fallbacks\":[\"catwiring-rt-router-fallback-to-deleted-provider-c-{{run_id}}/catwiring-rr16-{{run_id}}\",\"catwiring-rt-router-fallback-to-deleted-provider-b-{{run_id}}/catwiring-rr16-{{run_id}}\"]}"
+            }
+          }
+        },
+        {
+          "id": "rt-router-fallback-to-deleted-provider-09-delete-provider",
+          "name": "09. delete provider C after saving the router [router-fallback-to-deleted-provider]",
           "event": [
             {
               "listen": "test",
@@ -19904,8 +19951,8 @@
                 "type": "text/javascript",
                 "exec": [
                   "var acceptable = [200,204];",
-                  "var cleanupReq = \"cleanup: delete routing rule [rule-fallback-to-deleted-provider]\";",
-                  "pm.test(\"08. delete provider C after saving the rule [rule-fallback-to-deleted-provider]\", function () {",
+                  "var cleanupReq = \"cleanup: delete model router r1 [router-fallback-to-deleted-provider]\";",
+                  "pm.test(\"09. delete provider C after saving the router [router-fallback-to-deleted-provider]\", function () {",
                   "  pm.expect(acceptable, 'status ' + pm.response.code + ' body ' + pm.response.text()).to.include(pm.response.code);",
                   "});",
                   "if (acceptable.indexOf(pm.response.code) < 0) { pm.execution.setNextRequest(cleanupReq); }"
@@ -19917,21 +19964,21 @@
             "method": "DELETE",
             "header": [],
             "url": {
-              "raw": "{{base_url}}/api/providers/catwiring-rt-rule-fallback-to-deleted-provider-c-{{run_id}}",
+              "raw": "{{base_url}}/api/providers/catwiring-rt-router-fallback-to-deleted-provider-c-{{run_id}}",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
                 "api",
                 "providers",
-                "catwiring-rt-rule-fallback-to-deleted-provider-c-{{run_id}}"
+                "catwiring-rt-router-fallback-to-deleted-provider-c-{{run_id}}"
               ]
             }
           }
         },
         {
-          "id": "rt-rule-fallback-to-deleted-provider-09-await-catalog",
-          "name": "09. wait for the catalog to list the provider's models [rule-fallback-to-deleted-provider]",
+          "id": "rt-router-fallback-to-deleted-provider-10-await-catalog",
+          "name": "10. wait for the catalog to list the provider's models [router-fallback-to-deleted-provider]",
           "event": [
             {
               "listen": "prerequest",
@@ -19953,9 +20000,9 @@
                   "var maxAttempts = 8;",
                   "var pollKey = '__poll_' + pm.info.requestName;",
                   "var attempt = parseInt(pm.collectionVariables.get(pollKey) || '0', 10);",
-                  "var cleanupReq = \"cleanup: delete routing rule [rule-fallback-to-deleted-provider]\";",
+                  "var cleanupReq = \"cleanup: delete model router r1 [router-fallback-to-deleted-provider]\";",
                   "function assertNow() {",
-                  "  var providerName = 'catwiring-rt-rule-fallback-to-deleted-provider-' + pm.variables.get('run_id');",
+                  "  var providerName = 'catwiring-rt-router-fallback-to-deleted-provider-' + pm.variables.get('run_id');",
                   "  var expected = [\"catwiring-rr16-{{run_id}}\"].map(function (m) { return pm.variables.replaceIn(m); });",
                   "  if (pm.response.code !== 200) { throw new Error('list models status ' + pm.response.code); }",
                   "  var names = ((pm.response.json() || {}).models || []).filter(function (m) { return m.provider === providerName; })",
@@ -19969,7 +20016,7 @@
                   "try { assertNow(); } catch (e) { ok = false; errMsg = e.message; }",
                   "if (ok) {",
                   "  pm.collectionVariables.set(pollKey, '0');",
-                  "  pm.test(\"09. wait for the catalog to list the provider's models [rule-fallback-to-deleted-provider]\", function () { pm.expect(true, 'assertion satisfied').to.be.true; });",
+                  "  pm.test(\"10. wait for the catalog to list the provider's models [router-fallback-to-deleted-provider]\", function () { pm.expect(true, 'assertion satisfied').to.be.true; });",
                   "} else if (attempt < maxAttempts) {",
                   "  pm.collectionVariables.set(pollKey, String(attempt + 1));",
                   "  var sleepMs = Math.min(250 * Math.pow(2, attempt), 4000);",
@@ -19977,7 +20024,7 @@
                   "  pm.execution.setNextRequest(pm.info.requestName);",
                   "} else {",
                   "  pm.collectionVariables.set(pollKey, '0');",
-                  "  pm.test(\"09. wait for the catalog to list the provider's models [rule-fallback-to-deleted-provider]\", function () { throw new Error('gave up after ' + (maxAttempts + 1) + ' attempts: ' + errMsg); });",
+                  "  pm.test(\"10. wait for the catalog to list the provider's models [router-fallback-to-deleted-provider]\", function () { throw new Error('gave up after ' + (maxAttempts + 1) + ' attempts: ' + errMsg); });",
                   "  pm.execution.setNextRequest(cleanupReq);",
                   "}"
                 ]
@@ -19988,7 +20035,7 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{base_url}}/api/models?provider=catwiring-rt-rule-fallback-to-deleted-provider-{{run_id}}&limit=1000",
+              "raw": "{{base_url}}/api/models?provider=catwiring-rt-router-fallback-to-deleted-provider-{{run_id}}&limit=1000",
               "host": [
                 "{{base_url}}"
               ],
@@ -19999,7 +20046,7 @@
               "query": [
                 {
                   "key": "provider",
-                  "value": "catwiring-rt-rule-fallback-to-deleted-provider-{{run_id}}"
+                  "value": "catwiring-rt-router-fallback-to-deleted-provider-{{run_id}}"
                 },
                 {
                   "key": "limit",
@@ -20010,8 +20057,8 @@
           }
         },
         {
-          "id": "rt-rule-fallback-to-deleted-provider-10-await-catalog",
-          "name": "10. wait for the catalog to list b's models [rule-fallback-to-deleted-provider]",
+          "id": "rt-router-fallback-to-deleted-provider-11-await-catalog",
+          "name": "11. wait for the catalog to list b's models [router-fallback-to-deleted-provider]",
           "event": [
             {
               "listen": "prerequest",
@@ -20033,9 +20080,9 @@
                   "var maxAttempts = 8;",
                   "var pollKey = '__poll_' + pm.info.requestName;",
                   "var attempt = parseInt(pm.collectionVariables.get(pollKey) || '0', 10);",
-                  "var cleanupReq = \"cleanup: delete routing rule [rule-fallback-to-deleted-provider]\";",
+                  "var cleanupReq = \"cleanup: delete model router r1 [router-fallback-to-deleted-provider]\";",
                   "function assertNow() {",
-                  "  var providerName = 'catwiring-rt-rule-fallback-to-deleted-provider-b-' + pm.variables.get('run_id');",
+                  "  var providerName = 'catwiring-rt-router-fallback-to-deleted-provider-b-' + pm.variables.get('run_id');",
                   "  var expected = [\"catwiring-rr16-{{run_id}}\"].map(function (m) { return pm.variables.replaceIn(m); });",
                   "  if (pm.response.code !== 200) { throw new Error('list models status ' + pm.response.code); }",
                   "  var names = ((pm.response.json() || {}).models || []).filter(function (m) { return m.provider === providerName; })",
@@ -20049,7 +20096,7 @@
                   "try { assertNow(); } catch (e) { ok = false; errMsg = e.message; }",
                   "if (ok) {",
                   "  pm.collectionVariables.set(pollKey, '0');",
-                  "  pm.test(\"10. wait for the catalog to list b's models [rule-fallback-to-deleted-provider]\", function () { pm.expect(true, 'assertion satisfied').to.be.true; });",
+                  "  pm.test(\"11. wait for the catalog to list b's models [router-fallback-to-deleted-provider]\", function () { pm.expect(true, 'assertion satisfied').to.be.true; });",
                   "} else if (attempt < maxAttempts) {",
                   "  pm.collectionVariables.set(pollKey, String(attempt + 1));",
                   "  var sleepMs = Math.min(250 * Math.pow(2, attempt), 4000);",
@@ -20057,7 +20104,7 @@
                   "  pm.execution.setNextRequest(pm.info.requestName);",
                   "} else {",
                   "  pm.collectionVariables.set(pollKey, '0');",
-                  "  pm.test(\"10. wait for the catalog to list b's models [rule-fallback-to-deleted-provider]\", function () { throw new Error('gave up after ' + (maxAttempts + 1) + ' attempts: ' + errMsg); });",
+                  "  pm.test(\"11. wait for the catalog to list b's models [router-fallback-to-deleted-provider]\", function () { throw new Error('gave up after ' + (maxAttempts + 1) + ' attempts: ' + errMsg); });",
                   "  pm.execution.setNextRequest(cleanupReq);",
                   "}"
                 ]
@@ -20068,7 +20115,7 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{base_url}}/api/models?provider=catwiring-rt-rule-fallback-to-deleted-provider-b-{{run_id}}&limit=1000",
+              "raw": "{{base_url}}/api/models?provider=catwiring-rt-router-fallback-to-deleted-provider-b-{{run_id}}&limit=1000",
               "host": [
                 "{{base_url}}"
               ],
@@ -20079,7 +20126,7 @@
               "query": [
                 {
                   "key": "provider",
-                  "value": "catwiring-rt-rule-fallback-to-deleted-provider-b-{{run_id}}"
+                  "value": "catwiring-rt-router-fallback-to-deleted-provider-b-{{run_id}}"
                 },
                 {
                   "key": "limit",
@@ -20090,16 +20137,16 @@
           }
         },
         {
-          "id": "rt-rule-fallback-to-deleted-provider-11-route",
-          "name": "11. the rule's A fails; B serves [rule-fallback-to-deleted-provider]",
+          "id": "rt-router-fallback-to-deleted-provider-12-route",
+          "name": "12. the router's A fails; B serves [router-fallback-to-deleted-provider]",
           "event": [
             {
               "listen": "prerequest",
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "var rid = 'rw-rule-fallback-to-deleted-provider-11-' + pm.variables.get('run_id');",
-                  "pm.collectionVariables.set('reqid_rule-fallback-to-deleted-provider', rid);",
+                  "var rid = 'rw-router-fallback-to-deleted-provider-12-' + pm.variables.get('run_id');",
+                  "pm.collectionVariables.set('reqid_router-fallback-to-deleted-provider', rid);",
                   "pm.request.headers.upsert({ key: 'x-request-id', value: rid });"
                 ]
               }
@@ -20109,21 +20156,21 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "var cleanupReq = \"cleanup: delete routing rule [rule-fallback-to-deleted-provider]\";",
+                  "var cleanupReq = \"cleanup: delete model router r1 [router-fallback-to-deleted-provider]\";",
                   "function assertNow() {",
                   "  if (pm.response.code !== 200) { throw new Error('route status ' + pm.response.code + ' body ' + pm.response.text()); }",
                   "  var body = pm.response.json();",
                   "  if (!body.choices || body.choices.length === 0) { throw new Error('no choices'); }",
                   "  var ri = (body.extra_fields || {}).routing_info || {};",
-                  "  var allowedProviders = ['catwiring-rt-rule-fallback-to-deleted-provider-b-' + pm.variables.get('run_id')];",
+                  "  var allowedProviders = ['catwiring-rt-router-fallback-to-deleted-provider-b-' + pm.variables.get('run_id')];",
                   "  if (allowedProviders.indexOf(ri.provider) < 0) { throw new Error('routing_info.provider=' + ri.provider + ' not in ' + JSON.stringify(allowedProviders)); }",
                   "  if (Boolean(ri.is_fallback) !== true) { throw new Error('is_fallback=' + ri.is_fallback); }",
-                  "  var expectedPrimary = 'catwiring-rt-rule-fallback-to-deleted-provider-' + pm.variables.get('run_id');",
+                  "  var expectedPrimary = 'catwiring-rt-router-fallback-to-deleted-provider-' + pm.variables.get('run_id');",
                   "  if (ri.primary_provider !== expectedPrimary) { throw new Error('primary_provider=' + ri.primary_provider + ' expected ' + expectedPrimary); }",
                   "}",
                   "var ok = true, errMsg = '';",
                   "try { assertNow(); } catch (e) { ok = false; errMsg = e.message; }",
-                  "pm.test(\"11. the rule's A fails; B serves [rule-fallback-to-deleted-provider]\", function () { if (!ok) { throw new Error(errMsg); } });",
+                  "pm.test(\"12. the router's A fails; B serves [router-fallback-to-deleted-provider]\", function () { if (!ok) { throw new Error(errMsg); } });",
                   "if (!ok) { pm.execution.setNextRequest(cleanupReq); }"
                 ]
               }
@@ -20155,8 +20202,8 @@
           }
         },
         {
-          "id": "rt-rule-fallback-to-deleted-provider-12-assert-trail",
-          "name": "12. trail: the deleted C fallback is skipped with a warning [rule-fallback-to-deleted-provider]",
+          "id": "rt-router-fallback-to-deleted-provider-13-assert-trail",
+          "name": "13. trail: the deleted C fallback is skipped with a warning [router-fallback-to-deleted-provider]",
           "event": [
             {
               "listen": "prerequest",
@@ -20179,12 +20226,12 @@
                   "var maxAttempts = 8;",
                   "var pollKey = '__poll_' + pm.info.requestName;",
                   "var attempt = parseInt(pm.collectionVariables.get(pollKey) || '0', 10);",
-                  "var cleanupReq = \"cleanup: delete routing rule [rule-fallback-to-deleted-provider]\";",
+                  "var cleanupReq = \"cleanup: delete model router r1 [router-fallback-to-deleted-provider]\";",
                   "function assertNow() {",
                   "  if (pm.response.code !== 200) { throw new Error('log detail status ' + pm.response.code); }",
                   "  var row = pm.response.json() || {};",
                   "  var trail = row.routing_engine_logs || '';",
-                  "  var expected = [\"fallback \\\"catwiring-rt-rule-fallback-to-deleted-provider-c-{{run_id}}/catwiring-rr16-{{run_id}}\\\" skipped: it does not name a known provider\"].map(function (s) { return pm.variables.replaceIn(s); });",
+                  "  var expected = [\"fallback \\\"catwiring-rt-router-fallback-to-deleted-provider-c-{{run_id}}/catwiring-rr16-{{run_id}}\\\" skipped: it does not name a known provider\"].map(function (s) { return pm.variables.replaceIn(s); });",
                   "  expected.forEach(function (s) {",
                   "    if (String(trail).indexOf(s) < 0) { throw new Error('routing_engine_logs missing ' + JSON.stringify(s) + '; got ' + JSON.stringify(trail)); }",
                   "  });",
@@ -20197,7 +20244,7 @@
                   "try { assertNow(); } catch (e) { ok = false; errMsg = e.message; }",
                   "if (ok) {",
                   "  pm.collectionVariables.set(pollKey, '0');",
-                  "  pm.test(\"12. trail: the deleted C fallback is skipped with a warning [rule-fallback-to-deleted-provider]\", function () { pm.expect(true, 'assertion satisfied').to.be.true; });",
+                  "  pm.test(\"13. trail: the deleted C fallback is skipped with a warning [router-fallback-to-deleted-provider]\", function () { pm.expect(true, 'assertion satisfied').to.be.true; });",
                   "} else if (attempt < maxAttempts) {",
                   "  pm.collectionVariables.set(pollKey, String(attempt + 1));",
                   "  var sleepMs = Math.min(250 * Math.pow(2, attempt), 4000);",
@@ -20205,7 +20252,7 @@
                   "  pm.execution.setNextRequest(pm.info.requestName);",
                   "} else {",
                   "  pm.collectionVariables.set(pollKey, '0');",
-                  "  pm.test(\"12. trail: the deleted C fallback is skipped with a warning [rule-fallback-to-deleted-provider]\", function () { throw new Error('gave up after ' + (maxAttempts + 1) + ' attempts: ' + errMsg); });",
+                  "  pm.test(\"13. trail: the deleted C fallback is skipped with a warning [router-fallback-to-deleted-provider]\", function () { throw new Error('gave up after ' + (maxAttempts + 1) + ' attempts: ' + errMsg); });",
                   "  pm.execution.setNextRequest(cleanupReq);",
                   "}"
                 ]
@@ -20216,21 +20263,21 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{base_url}}/api/logs/{{reqid_rule-fallback-to-deleted-provider}}",
+              "raw": "{{base_url}}/api/logs/{{reqid_router-fallback-to-deleted-provider}}",
               "host": [
                 "{{base_url}}"
               ],
               "path": [
                 "api",
                 "logs",
-                "{{reqid_rule-fallback-to-deleted-provider}}"
+                "{{reqid_router-fallback-to-deleted-provider}}"
               ]
             }
           }
         },
         {
-          "id": "rt-rule-fallback-to-deleted-provider-13-assert-fallback-row",
-          "name": "13. B served as fallback 1 [rule-fallback-to-deleted-provider]",
+          "id": "rt-router-fallback-to-deleted-provider-14-assert-fallback-row",
+          "name": "14. B served as fallback 1 [router-fallback-to-deleted-provider]",
           "event": [
             {
               "listen": "prerequest",
@@ -20252,11 +20299,11 @@
                   "var maxAttempts = 8;",
                   "var pollKey = '__poll_' + pm.info.requestName;",
                   "var attempt = parseInt(pm.collectionVariables.get(pollKey) || '0', 10);",
-                  "var cleanupReq = \"cleanup: delete routing rule [rule-fallback-to-deleted-provider]\";",
+                  "var cleanupReq = \"cleanup: delete model router r1 [router-fallback-to-deleted-provider]\";",
                   "function assertNow() {",
                   "  if (pm.response.code !== 200) { throw new Error('logs status ' + pm.response.code); }",
                   "  var logs = (pm.response.json() || {}).logs || [];",
-                  "  var providerName = 'catwiring-rt-rule-fallback-to-deleted-provider-b-' + pm.variables.get('run_id');",
+                  "  var providerName = 'catwiring-rt-router-fallback-to-deleted-provider-b-' + pm.variables.get('run_id');",
                   "  var row = logs.filter(function (l) { return l.provider === providerName && l.fallback_index === 1; })[0];",
                   "  if (!row) { throw new Error('no fallback attempt on ' + providerName + ' at index 1 among ' + JSON.stringify(logs.map(function (l) { return [l.provider, l.fallback_index, l.status]; }))); }",
                   "  if (row.status !== \"success\") { throw new Error('fallback attempt status=' + row.status); }",
@@ -20265,7 +20312,7 @@
                   "try { assertNow(); } catch (e) { ok = false; errMsg = e.message; }",
                   "if (ok) {",
                   "  pm.collectionVariables.set(pollKey, '0');",
-                  "  pm.test(\"13. B served as fallback 1 [rule-fallback-to-deleted-provider]\", function () { pm.expect(true, 'assertion satisfied').to.be.true; });",
+                  "  pm.test(\"14. B served as fallback 1 [router-fallback-to-deleted-provider]\", function () { pm.expect(true, 'assertion satisfied').to.be.true; });",
                   "} else if (attempt < maxAttempts) {",
                   "  pm.collectionVariables.set(pollKey, String(attempt + 1));",
                   "  var sleepMs = Math.min(250 * Math.pow(2, attempt), 4000);",
@@ -20273,7 +20320,7 @@
                   "  pm.execution.setNextRequest(pm.info.requestName);",
                   "} else {",
                   "  pm.collectionVariables.set(pollKey, '0');",
-                  "  pm.test(\"13. B served as fallback 1 [rule-fallback-to-deleted-provider]\", function () { throw new Error('gave up after ' + (maxAttempts + 1) + ' attempts: ' + errMsg); });",
+                  "  pm.test(\"14. B served as fallback 1 [router-fallback-to-deleted-provider]\", function () { throw new Error('gave up after ' + (maxAttempts + 1) + ' attempts: ' + errMsg); });",
                   "  pm.execution.setNextRequest(cleanupReq);",
                   "}"
                 ]
@@ -20284,7 +20331,7 @@
             "method": "GET",
             "header": [],
             "url": {
-              "raw": "{{base_url}}/api/logs?parent_request_id={{reqid_rule-fallback-to-deleted-provider}}&limit=10",
+              "raw": "{{base_url}}/api/logs?parent_request_id={{reqid_router-fallback-to-deleted-provider}}&limit=10",
               "host": [
                 "{{base_url}}"
               ],
@@ -20295,7 +20342,7 @@
               "query": [
                 {
                   "key": "parent_request_id",
-                  "value": "{{reqid_rule-fallback-to-deleted-provider}}"
+                  "value": "{{reqid_router-fallback-to-deleted-provider}}"
                 },
                 {
                   "key": "limit",
@@ -20309,15 +20356,15 @@
           "name": "Cleanup",
           "item": [
             {
-              "id": "rt-rule-fallback-to-deleted-provider-cleanup-rule",
-              "name": "cleanup: delete routing rule [rule-fallback-to-deleted-provider]",
+              "id": "rt-router-fallback-to-deleted-provider-cleanup-router-r1",
+              "name": "cleanup: delete model router r1 [router-fallback-to-deleted-provider]",
               "event": [
                 {
                   "listen": "test",
                   "script": {
                     "type": "text/javascript",
                     "exec": [
-                      "pm.test(\"cleanup: delete routing rule [rule-fallback-to-deleted-provider]\", function () {",
+                      "pm.test(\"cleanup: delete model router r1 [router-fallback-to-deleted-provider]\", function () {",
                       "  pm.expect([200, 204, 404], 'cleanup status ' + pm.response.code).to.include(pm.response.code);",
                       "});"
                     ]
@@ -20328,29 +20375,29 @@
                 "method": "DELETE",
                 "header": [],
                 "url": {
-                  "raw": "{{base_url}}/api/governance/routing-rules/{{ruleid_rule-fallback-to-deleted-provider}}",
+                  "raw": "{{base_url}}/api/routing/model-routers/catwiring-rtr-router-fallback-to-deleted-provider-r1-{{run_id}}",
                   "host": [
                     "{{base_url}}"
                   ],
                   "path": [
                     "api",
-                    "governance",
-                    "routing-rules",
-                    "{{ruleid_rule-fallback-to-deleted-provider}}"
+                    "routing",
+                    "model-routers",
+                    "catwiring-rtr-router-fallback-to-deleted-provider-r1-{{run_id}}"
                   ]
                 }
               }
             },
             {
-              "id": "rt-rule-fallback-to-deleted-provider-cleanup-provider-self",
-              "name": "cleanup: delete provider [rule-fallback-to-deleted-provider]",
+              "id": "rt-router-fallback-to-deleted-provider-cleanup-provider-self",
+              "name": "cleanup: delete provider [router-fallback-to-deleted-provider]",
               "event": [
                 {
                   "listen": "test",
                   "script": {
                     "type": "text/javascript",
                     "exec": [
-                      "pm.test(\"cleanup: delete provider [rule-fallback-to-deleted-provider]\", function () {",
+                      "pm.test(\"cleanup: delete provider [router-fallback-to-deleted-provider]\", function () {",
                       "  pm.expect([200, 204, 404], 'cleanup status ' + pm.response.code).to.include(pm.response.code);",
                       "});"
                     ]
@@ -20361,28 +20408,28 @@
                 "method": "DELETE",
                 "header": [],
                 "url": {
-                  "raw": "{{base_url}}/api/providers/catwiring-rt-rule-fallback-to-deleted-provider-{{run_id}}",
+                  "raw": "{{base_url}}/api/providers/catwiring-rt-router-fallback-to-deleted-provider-{{run_id}}",
                   "host": [
                     "{{base_url}}"
                   ],
                   "path": [
                     "api",
                     "providers",
-                    "catwiring-rt-rule-fallback-to-deleted-provider-{{run_id}}"
+                    "catwiring-rt-router-fallback-to-deleted-provider-{{run_id}}"
                   ]
                 }
               }
             },
             {
-              "id": "rt-rule-fallback-to-deleted-provider-cleanup-provider-b",
-              "name": "cleanup: delete provider b [rule-fallback-to-deleted-provider]",
+              "id": "rt-router-fallback-to-deleted-provider-cleanup-provider-b",
+              "name": "cleanup: delete provider b [router-fallback-to-deleted-provider]",
               "event": [
                 {
                   "listen": "test",
                   "script": {
                     "type": "text/javascript",
                     "exec": [
-                      "pm.test(\"cleanup: delete provider b [rule-fallback-to-deleted-provider]\", function () {",
+                      "pm.test(\"cleanup: delete provider b [router-fallback-to-deleted-provider]\", function () {",
                       "  pm.expect([200, 204, 404], 'cleanup status ' + pm.response.code).to.include(pm.response.code);",
                       "});"
                     ]
@@ -20393,28 +20440,28 @@
                 "method": "DELETE",
                 "header": [],
                 "url": {
-                  "raw": "{{base_url}}/api/providers/catwiring-rt-rule-fallback-to-deleted-provider-b-{{run_id}}",
+                  "raw": "{{base_url}}/api/providers/catwiring-rt-router-fallback-to-deleted-provider-b-{{run_id}}",
                   "host": [
                     "{{base_url}}"
                   ],
                   "path": [
                     "api",
                     "providers",
-                    "catwiring-rt-rule-fallback-to-deleted-provider-b-{{run_id}}"
+                    "catwiring-rt-router-fallback-to-deleted-provider-b-{{run_id}}"
                   ]
                 }
               }
             },
             {
-              "id": "rt-rule-fallback-to-deleted-provider-cleanup-provider-c",
-              "name": "cleanup: delete provider c [rule-fallback-to-deleted-provider]",
+              "id": "rt-router-fallback-to-deleted-provider-cleanup-provider-c",
+              "name": "cleanup: delete provider c [router-fallback-to-deleted-provider]",
               "event": [
                 {
                   "listen": "test",
                   "script": {
                     "type": "text/javascript",
                     "exec": [
-                      "pm.test(\"cleanup: delete provider c [rule-fallback-to-deleted-provider]\", function () {",
+                      "pm.test(\"cleanup: delete provider c [router-fallback-to-deleted-provider]\", function () {",
                       "  pm.expect([200, 204, 404], 'cleanup status ' + pm.response.code).to.include(pm.response.code);",
                       "});"
                     ]
@@ -20425,14 +20472,14 @@
                 "method": "DELETE",
                 "header": [],
                 "url": {
-                  "raw": "{{base_url}}/api/providers/catwiring-rt-rule-fallback-to-deleted-provider-c-{{run_id}}",
+                  "raw": "{{base_url}}/api/providers/catwiring-rt-router-fallback-to-deleted-provider-c-{{run_id}}",
                   "host": [
                     "{{base_url}}"
                   ],
                   "path": [
                     "api",
                     "providers",
-                    "catwiring-rt-rule-fallback-to-deleted-provider-c-{{run_id}}"
+                    "catwiring-rt-router-fallback-to-deleted-provider-c-{{run_id}}"
                   ]
                 }
               }
@@ -28484,7 +28531,7 @@
     },
     {
       "name": "A conditional model router with no target passes the request to the next router",
-      "description": "Two conditional routers take this run's own model. The first has no target, so it passes the request on, as a routing rule with no target does; the second sends it to B. The trail shows the first router passing the request on and the second choosing.",
+      "description": "Two conditional routers take this run's own model. The first has no target, so it passes the request on; the second sends it to B. The trail shows the first router passing the request on and the second choosing.",
       "item": [
         {
           "id": "rt-router-no-target-passes-on-01-add-provider",
@@ -30326,7 +30373,7 @@
             },
             "body": {
               "mode": "raw",
-              "raw": "{\"targets\":[{\"weight\":1,\"fallbacks\":[\"catwiring-rt-router-keeps-model-adds-fallbacks-b-{{run_id}}/catwiring-mr04-{{run_id}}\"]}]}"
+              "raw": "{\"targets\":[{\"weight\":1}],\"fallbacks\":[\"catwiring-rt-router-keeps-model-adds-fallbacks-b-{{run_id}}/catwiring-mr04-{{run_id}}\"]}"
             }
           }
         },
