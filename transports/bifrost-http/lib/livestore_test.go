@@ -853,11 +853,13 @@ func TestLoadConfigLoadsGovernanceInBothModes(t *testing.T) {
 		require.Equal(t, "budget-team", budgets[0].ID, name)
 		require.Equal(t, 50.0, budgets[0].MaxLimit, name)
 
+		// rl-mc is a legacy request-only row with one holder, so the load moves it to the model config's
+		// request limit, as the migration does for a stored one.
 		_, rateLimits := gs.GlobalModelLimits(ctx, schemas.OpenAI, "gpt-4o")
 		require.Len(t, rateLimits, 1, "%s: the model config holds its rate limit", name)
-		require.Equal(t, "rl-mc", rateLimits[0].ID, name)
+		require.Equal(t, configstoreTables.LegacyRequestLimitID("rl-mc"), rateLimits[0].ID, name)
 		require.Equal(t, "mc-1", rateLimits[0].HolderID, name)
-		rateLimit := gs.LoadRateLimit(ctx, "rl-mc")
+		rateLimit := gs.LoadRateLimit(ctx, configstoreTables.LegacyRequestLimitID("rl-mc"))
 		require.NotNil(t, rateLimit, name)
 		require.Equal(t, int64(10), *rateLimit.RequestMaxLimit, name)
 	}

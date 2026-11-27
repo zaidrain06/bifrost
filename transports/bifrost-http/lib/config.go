@@ -65,6 +65,7 @@ import (
 	"github.com/maximhq/bifrost/plugins/semanticcache"
 	"github.com/maximhq/bifrost/plugins/telemetry"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // StreamChunkInterceptor intercepts streaming chunks before they're sent to clients.
@@ -292,11 +293,14 @@ type ConfigData struct {
 	// Warp is the Warp settings page (models, behaviour, log search, topics).
 	Warp *WarpFileConfig `json:"warp,omitempty"`
 
-	presentSections           map[string]bool
-	presentGovernanceSections map[string]bool
-	presentMCPSections        map[string]bool
-	SkillsRegistry            *SkillsRegistryConfig `json:"skills_registry,omitempty"`
-	rejectedMCPClients        map[string]bool       // file clients dropped while loading; a config.json sync keeps their stored clients
+	presentSections              map[string]bool
+	presentGovernanceSections    map[string]bool
+	presentMCPSections           map[string]bool
+	SkillsRegistry               *SkillsRegistryConfig                                `json:"skills_registry,omitempty"`
+	rejectedMCPClients           map[string]bool                                      // file clients dropped while loading; a config.json sync keeps their stored clients
+	splitRequestOnlyRateLimitIDs map[string]bool                                      // see splitLegacyGovernanceRequestLimits
+	legacyTierRequestLimits      map[legacyTierKey][]configstoreTables.TableRateLimit // see splitLegacyGovernanceRequestLimits
+	namedHolderIDs               map[namedHolder]bool                                 // stored ids of holders declared by name; see storedIDByName
 }
 
 // SkillsRegistryConfig defines declarative skill definitions in config.json.
@@ -1201,6 +1205,564 @@ func validateGovernanceBudgetScopes(configData *ConfigData, warn func(string, ..
 	return nil
 }
 
+// withDeclaredHash stamps a held-aside tier request limit with the hash of what the file declares, the
+// baseline the stored row is compared against on later boots.
+func withDeclaredHash(limit configstoreTables.TableRateLimit) configstoreTables.TableRateLimit {
+	if hash, err := configstore.GenerateRateLimitHash(limit); err == nil {
+		limit.ConfigHash = hash
+	}
+	return limit
+}
+
+// tierRequestLimitsDiffer reports whether config.json declares a request limit for the key's tier (or a
+// provider config's) that it did not declare when the stored limit was last written from the file. The
+// key's hash is taken from the file as declared and does not see those limits once the split holds them
+// aside, so a changed maximum on an otherwise unchanged key would never be written without this.
+//
+// The stored row's config_hash is the baseline, not its current values: a dashboard edit changes the
+// values and leaves the hash alone, so an edited limit is not rewritten on every boot. A row with no
+// hash has no baseline and is left to the dashboard, and a read that fails is not a change.
+func (c *Config) tierRequestLimitsDiffer(ctx context.Context, configData *ConfigData, vk configstoreTables.TableVirtualKey) bool {
+	if c.ConfigStore == nil || len(configData.legacyTierRequestLimits) == 0 {
+		return false
+	}
+	for key, rules := range configData.legacyTierRequestLimits {
+		if key.vkID != vk.ID {
+			continue
+		}
+		for _, rule := range rules {
+			stored, err := c.ConfigStore.GetRateLimit(ctx, rule.ID)
+			if errors.Is(err, configstore.ErrNotFound) {
+				return true
+			}
+			if err != nil || stored == nil {
+				continue
+			}
+			if tierRequestLimitChanged(rule, *stored) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// tierRequestLimitChanged reports whether config.json declares a tier request limit differently from
+// when it last wrote the stored row. The stored config_hash is the baseline: a dashboard edit changes
+// the values and leaves the hash alone, and a row with no hash has no baseline and is the dashboard's.
+// The migration hashed the rows it split with their owner, which the file's copy names only once the
+// tier is read, so the same declaration under the stored owner is no change either.
+func tierRequestLimitChanged(rule, stored configstoreTables.TableRateLimit) bool {
+	if stored.ConfigHash == "" || rule.ConfigHash == "" || stored.ConfigHash == rule.ConfigHash {
+		return false
+	}
+	owned := rule
+	owned.ModelConfigID, owned.TeamID, owned.CustomerID = stored.ModelConfigID, stored.TeamID, stored.CustomerID
+	if hash, err := configstore.GenerateRateLimitHash(owned); err == nil && hash == stored.ConfigHash {
+		return false
+	}
+	return true
+}
+
+// samePointee reports whether two optional values are both unset or both set to the same value.
+func samePointee[T comparable](a, b *T) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// legacyTierKey keys a virtual key's all-models tier for a provider ("" for the key itself).
+type legacyTierKey struct{ vkID, provider string }
+
+func newLegacyTierKey(vkID string, provider *string) legacyTierKey {
+	if provider == nil {
+		return legacyTierKey{vkID: vkID}
+	}
+	return legacyTierKey{vkID: vkID, provider: *provider}
+}
+
+// legacyRequestLimitSplit holds what splitting a config.json's combined rate limits needs: how many
+// holders reference each row, so only a singly referenced one is split. db is the config store's
+// database, nil without one; with it, a row another stored holder references stays combined too.
+type legacyRequestLimitSplit struct {
+	configData *ConfigData
+	gov        *configstore.GovernanceConfig
+	references map[string]int
+	indexOf    map[string]int
+	dropped    map[string]bool
+	db         *gorm.DB
+}
+
+// holderRow selects, in table, the stored rows of the holder a split is for.
+type holderRow struct {
+	table string
+	where string
+	args  []any
+}
+
+// newLegacyRequestLimitSplit returns nil when config.json declares no rate limits to split.
+func newLegacyRequestLimitSplit(configData *ConfigData, db *gorm.DB) *legacyRequestLimitSplit {
+	if configData == nil || configData.Governance == nil || len(configData.Governance.RateLimits) == 0 {
+		return nil
+	}
+	gov := configData.Governance
+	references := make(map[string]int)
+	count := func(id *string) {
+		if id != nil && *id != "" {
+			references[*id]++
+		}
+	}
+	for i := range gov.ModelConfigs {
+		count(gov.ModelConfigs[i].RateLimitID)
+	}
+	for i := range gov.Teams {
+		count(gov.Teams[i].RateLimitID)
+	}
+	for i := range gov.Customers {
+		count(gov.Customers[i].RateLimitID)
+	}
+	for i := range gov.VirtualKeys {
+		count(gov.VirtualKeys[i].RateLimitID)
+		for j := range gov.VirtualKeys[i].ProviderConfigs {
+			count(gov.VirtualKeys[i].ProviderConfigs[j].RateLimitID)
+		}
+	}
+	for i := range gov.Providers {
+		count(gov.Providers[i].RateLimitID)
+	}
+	indexOf := make(map[string]int, len(gov.RateLimits))
+	for i := range gov.RateLimits {
+		indexOf[gov.RateLimits[i].ID] = i
+	}
+	dropped := configData.splitRequestOnlyRateLimitIDs
+	if dropped == nil {
+		dropped = make(map[string]bool)
+	}
+	return &legacyRequestLimitSplit{configData: configData, gov: gov, references: references, indexOf: indexOf, dropped: dropped, db: db}
+}
+
+// referencedElsewhere reports whether a stored row other than the holder's own (own) references the
+// rate limit id. The file counts only its own holders, and a holder the dashboard manages may name
+// the row too: splitting it would take that holder's request limit away. References are counted as
+// the migration counts them (configstore.CountRateLimitReferences); on an error the row stays combined.
+func (s *legacyRequestLimitSplit) referencedElsewhere(id string, own []holderRow) bool {
+	if s.db == nil {
+		return false
+	}
+	references, err := configstore.CountRateLimitReferences(s.db, []string{id})
+	if err != nil {
+		logger.Warn("failed to count the references of rate limit %s; it stays combined: %v", id, err)
+		return true
+	}
+	others := int64(references[id])
+	for _, row := range own {
+		var n int64
+		if err := s.db.Table(row.table).Where("rate_limit_id = ?", id).Where(row.where, row.args...).Count(&n).Error; err != nil {
+			logger.Warn("failed to count the references of rate limit %s; it stays combined: %v", id, err)
+			return true
+		}
+		others -= n
+	}
+	if others > 0 {
+		logger.Warn("rate limit %s is referenced by another holder in the database; its request limit stays combined", id)
+		return true
+	}
+	return false
+}
+
+// derivedIDTakenByAnother reports whether a stored row already holds derivedID for an owner other than
+// the holder, which the migration refuses to split over: writing the split there would lose that row.
+// The stored row is the holder's own when one of own selects its owner. On an error the row stays
+// combined.
+func (s *legacyRequestLimitSplit) derivedIDTakenByAnother(derivedID string, own []holderRow) bool {
+	if s.db == nil {
+		return false
+	}
+	var stored []configstoreTables.TableRateLimit
+	if err := s.db.Select("id", "model_config_id", "team_id", "customer_id").Where("id = ?", derivedID).Limit(1).Find(&stored).Error; err != nil {
+		logger.Warn("failed to read the stored rate limit %s; its source stays combined: %v", derivedID, err)
+		return true
+	}
+	if len(stored) == 0 {
+		return false
+	}
+	var ownerTable, ownerID string
+	switch existing := stored[0]; {
+	case existing.ModelConfigID != nil:
+		ownerTable, ownerID = configstoreTables.TableModelConfig{}.TableName(), *existing.ModelConfigID
+	case existing.TeamID != nil:
+		ownerTable, ownerID = configstoreTables.TableTeam{}.TableName(), *existing.TeamID
+	case existing.CustomerID != nil:
+		ownerTable, ownerID = configstoreTables.TableCustomer{}.TableName(), *existing.CustomerID
+	}
+	for _, row := range own {
+		if ownerTable == "" || row.table != ownerTable {
+			continue
+		}
+		var n int64
+		if err := s.db.Table(row.table).Where("id = ?", ownerID).Where(row.where, row.args...).Count(&n).Error; err != nil {
+			logger.Warn("failed to read the owner of rate limit %s; its source stays combined: %v", derivedID, err)
+			return true
+		}
+		if n > 0 {
+			return false
+		}
+	}
+	logger.Warn("the id %s for a split request limit is already taken by another stored rate limit; its source stays combined", derivedID)
+	return true
+}
+
+// namedHolder is a team or customer config.json declares by name, under its stored id. Teams and
+// customers live in separate tables, so the kind is part of the key: the same id may name one of each.
+type namedHolder struct{ kind, id string }
+
+// storedIDByName returns the id of the row of table (teams and customers, whose names are unique)
+// named name, or "" without a database or such a row. The merge adopts that id for a holder the file
+// declares by name, so its split must take that owner too: otherwise the request limit the migration
+// moved for it looks undeclared and the cleanup removes it. The id is recorded under kind in
+// configData.namedHolderIDs, which validation counts as declared.
+func (s *legacyRequestLimitSplit) storedIDByName(table, name, kind string) string {
+	if s.db == nil || name == "" {
+		return ""
+	}
+	var ids []string
+	if err := s.db.Table(table).Where("name = ?", name).Limit(1).Pluck("id", &ids).Error; err != nil {
+		logger.Warn("failed to read the stored id of %s %q; its rate limit stays combined: %v", table, name, err)
+		return ""
+	}
+	if len(ids) == 0 {
+		return ""
+	}
+	if s.configData.namedHolderIDs == nil {
+		s.configData.namedHolderIDs = make(map[namedHolder]bool)
+	}
+	s.configData.namedHolderIDs[namedHolder{kind: kind, id: ids[0]}] = true
+	return ids[0]
+}
+
+// split takes the request limit off the row rateLimitID names, when that row can be split. own
+// selects the holder's stored rows, which may reference the row without making it shared.
+func (s *legacyRequestLimitSplit) split(rateLimitID *string, own ...holderRow) (configstoreTables.TableRateLimit, bool) {
+	if rateLimitID == nil || s.references[*rateLimitID] != 1 {
+		return configstoreTables.TableRateLimit{}, false
+	}
+	i, ok := s.indexOf[*rateLimitID]
+	if !ok {
+		return configstoreTables.TableRateLimit{}, false
+	}
+	rl := &s.gov.RateLimits[i]
+	if rl.RequestMaxLimit == nil || rl.IsRequestLimit() {
+		return configstoreTables.TableRateLimit{}, false
+	}
+	// Only a legacy shared row splits into a shared limit. A model or MCP scope, or an invalid one,
+	// stays as declared so validation sees it instead of the split quietly rewriting it.
+	if rl.Scope.Normalize() != configstoreTables.LimitScopeShared {
+		return configstoreTables.TableRateLimit{}, false
+	}
+	// A row the file already declares under the derived id is another rate limit's: the migration's
+	// collision policy applies, and this one stays combined.
+	derivedID := configstoreTables.LegacyRequestLimitID(rl.ID)
+	if _, taken := s.indexOf[derivedID]; taken {
+		return configstoreTables.TableRateLimit{}, false
+	}
+	if s.referencedElsewhere(rl.ID, own) || s.derivedIDTakenByAnother(derivedID, own) {
+		return configstoreTables.TableRateLimit{}, false
+	}
+	limit := configstoreTables.TableRateLimit{
+		ID:                     derivedID,
+		RequestMaxLimit:        rl.RequestMaxLimit,
+		RequestResetDuration:   rl.RequestResetDuration,
+		RequestCurrentUsage:    rl.RequestCurrentUsage,
+		RequestLastReset:       rl.RequestLastReset,
+		RequestUsageResetEpoch: rl.RequestUsageResetEpoch, // the counter's reset evidence moves with it, as in the migration
+		Scope:                  configstoreTables.LimitScopeShared,
+		CreatedAt:              rl.CreatedAt, // anchors the reset windows, as in the migration
+	}
+	if stored, ok := s.storedRequestCounter(rl.ID, derivedID); ok {
+		limit.RequestCurrentUsage, limit.RequestLastReset = stored.RequestCurrentUsage, stored.RequestLastReset
+		limit.RequestUsageResetEpoch, limit.CreatedAt = stored.RequestUsageResetEpoch, stored.CreatedAt
+	}
+	rl.RequestMaxLimit, rl.RequestResetDuration = nil, nil
+	rl.RequestCurrentUsage, rl.RequestLastReset, rl.RequestUsageResetEpoch = 0, time.Time{}, 0
+	if rl.TokenMaxLimit == nil {
+		s.dropped[rl.ID] = true
+	}
+	return limit, true
+}
+
+// storedRequestCounter returns the stored row id when it enforces a request limit and derivedID is
+// not stored yet: the first split of that row, whose request limit then starts from the stored
+// counter, last reset, reset epoch and window anchor, as the migration moves them. Without this the
+// split would hand back the requests already made in the window. A derived row already stored keeps
+// its own counter, and a read that fails starts the request limit afresh.
+func (s *legacyRequestLimitSplit) storedRequestCounter(id, derivedID string) (configstoreTables.TableRateLimit, bool) {
+	if s.db == nil {
+		return configstoreTables.TableRateLimit{}, false
+	}
+	var rows []configstoreTables.TableRateLimit
+	if err := s.db.Where("id IN ?", []string{id, derivedID}).Find(&rows).Error; err != nil {
+		logger.Warn("failed to read the stored request usage of rate limit %s; its split request limit starts afresh: %v", id, err)
+		return configstoreTables.TableRateLimit{}, false
+	}
+	var source *configstoreTables.TableRateLimit
+	for i := range rows {
+		if rows[i].ID == derivedID {
+			return configstoreTables.TableRateLimit{}, false
+		}
+		source = &rows[i]
+	}
+	if source == nil || source.RequestMaxLimit == nil {
+		return configstoreTables.TableRateLimit{}, false
+	}
+	return *source, true
+}
+
+// finish drops the rows left holding nothing, adds the split request limits and records both on
+// configData.
+func (s *legacyRequestLimitSplit) finish(limits []configstoreTables.TableRateLimit, tierLimits map[legacyTierKey][]configstoreTables.TableRateLimit) {
+	if len(limits) == 0 && len(tierLimits) == 0 {
+		return
+	}
+	if len(s.dropped) > 0 {
+		kept := s.gov.RateLimits[:0]
+		for _, rl := range s.gov.RateLimits {
+			if !s.dropped[rl.ID] {
+				kept = append(kept, rl)
+			}
+		}
+		s.gov.RateLimits = kept
+	}
+	s.gov.RateLimits = append(s.gov.RateLimits, limits...)
+	s.configData.splitRequestOnlyRateLimitIDs = s.dropped
+	s.configData.legacyTierRequestLimits = tierLimits
+}
+
+// splitLegacyGovernanceRequestLimits moves each model config's, team's and customer's max-requests
+// limit out of a combined governance.rate_limits row into a request limit, exactly as the configstore
+// migration split_request_limits_from_rate_limits does for stored rows, so a config.json written
+// before request limits existed loads into the same rows the migration left and the next sync finds
+// nothing changed.
+//
+// A row is split only when exactly one holder references it, and a model config's only when it is
+// global or virtual-key scoped. The request limit takes LegacyRequestLimitID(id), scope "shared"
+// (the combined row counted both kinds of traffic) and the holder as owner; the row keeps its token
+// limit, or is dropped when it had none.
+//
+// Holder references to a dropped row are left in place here: model config hashes include them, and
+// the stored hash was computed from the file as declared. The merge clears them after hashing (see
+// clearSplitRateLimitRefs). A dropped row's id is kept in configData.splitRequestOnlyRateLimitIDs.
+//
+// db is the config store's database, nil without one. With it, a row a stored holder other than the
+// file's one also references stays combined, as the migration leaves it.
+func splitLegacyGovernanceRequestLimits(configData *ConfigData, db *gorm.DB) {
+	s := newLegacyRequestLimitSplit(configData, db)
+	if s == nil {
+		return
+	}
+	var limits []configstoreTables.TableRateLimit
+	for i := range s.gov.ModelConfigs {
+		mc := &s.gov.ModelConfigs[i]
+		// Project-scoped model configs stay combined, as in the migration: other tables reference
+		// their rate limits.
+		switch mc.Scope {
+		case "", configstoreTables.ModelConfigScopeGlobal, configstoreTables.ModelConfigScopeVirtualKey:
+		default:
+			continue
+		}
+		if mc.ID == "" {
+			continue
+		}
+		if limit, ok := s.split(mc.RateLimitID, holderRow{configstoreTables.TableModelConfig{}.TableName(), "id = ?", []any{mc.ID}}); ok {
+			limit.ModelConfigID = &mc.ID
+			limits = append(limits, limit)
+		}
+	}
+	// A team or customer declared by name is the stored row of that name (see storedIDByName).
+	for i := range s.gov.Teams {
+		team := &s.gov.Teams[i]
+		id := team.ID
+		if id == "" {
+			id = s.storedIDByName(configstoreTables.TableTeam{}.TableName(), team.Name, "team")
+		}
+		if id == "" {
+			continue
+		}
+		if limit, ok := s.split(team.RateLimitID, holderRow{configstoreTables.TableTeam{}.TableName(), "id = ?", []any{id}}); ok {
+			limit.TeamID = &id
+			limits = append(limits, limit)
+		}
+	}
+	for i := range s.gov.Customers {
+		customer := &s.gov.Customers[i]
+		id := customer.ID
+		if id == "" {
+			id = s.storedIDByName(configstoreTables.TableCustomer{}.TableName(), customer.Name, "customer")
+		}
+		if id == "" {
+			continue
+		}
+		if limit, ok := s.split(customer.RateLimitID, holderRow{configstoreTables.TableCustomer{}.TableName(), "id = ?", []any{id}}); ok {
+			limit.CustomerID = &id
+			limits = append(limits, limit)
+		}
+	}
+	s.finish(limits, s.configData.legacyTierRequestLimits)
+}
+
+// splitLegacyVirtualKeyRequestLimits is splitLegacyGovernanceRequestLimits for virtual keys and their
+// provider configs, which the merge does only when a config store exists. Without one, governance
+// runs from the file as loaded, which reads a key's request limit from its rate limit, so the key's
+// combined row is left as it is.
+//
+// A key's own rate limit (and a provider config's) belongs to the key's tier model config, whose id
+// is only known once the store is read, so its request limit is kept aside in
+// configData.legacyTierRequestLimits and written onto the tier with the key. The key's stored rows
+// are its own row (or provider config's) and that tier, which the earlier migration moved it onto.
+func splitLegacyVirtualKeyRequestLimits(configData *ConfigData, db *gorm.DB) {
+	s := newLegacyRequestLimitSplit(configData, db)
+	if s == nil {
+		return
+	}
+	tierLimits := configData.legacyTierRequestLimits
+	if tierLimits == nil {
+		tierLimits = make(map[legacyTierKey][]configstoreTables.TableRateLimit)
+	}
+	for i := range s.gov.VirtualKeys {
+		vk := &s.gov.VirtualKeys[i]
+		if vk.ID == "" {
+			continue
+		}
+		if limit, ok := s.split(vk.RateLimitID,
+			holderRow{configstoreTables.TableVirtualKey{}.TableName(), "id = ?", []any{vk.ID}},
+			holderRow{configstoreTables.TableModelConfig{}.TableName(), "scope = ? AND scope_id = ? AND model_name = ? AND (provider IS NULL OR provider = '')",
+				[]any{configstoreTables.ModelConfigScopeVirtualKey, vk.ID, configstoreTables.ModelConfigAllModels}}); ok {
+			key := legacyTierKey{vkID: vk.ID}
+			tierLimits[key] = append(tierLimits[key], withDeclaredHash(limit))
+		}
+		for j := range vk.ProviderConfigs {
+			pc := &vk.ProviderConfigs[j]
+			if limit, ok := s.split(pc.RateLimitID,
+				holderRow{configstoreTables.TableVirtualKeyProviderConfig{}.TableName(), "virtual_key_id = ? AND provider = ?", []any{vk.ID, pc.Provider}},
+				holderRow{configstoreTables.TableModelConfig{}.TableName(), "scope = ? AND scope_id = ? AND model_name = ? AND provider = ?",
+					[]any{configstoreTables.ModelConfigScopeVirtualKey, vk.ID, configstoreTables.ModelConfigAllModels, pc.Provider}}); ok {
+				key := legacyTierKey{vkID: vk.ID, provider: pc.Provider}
+				tierLimits[key] = append(tierLimits[key], withDeclaredHash(limit))
+			}
+		}
+	}
+	s.finish(nil, tierLimits)
+}
+
+// clearSplitRateLimitRefs drops a reference to a rate limit splitLegacyGovernanceRequestLimits removed
+// for holding nothing but a request limit. Called once the holder's hash is taken from the file as declared.
+func (cd *ConfigData) clearSplitRateLimitRefs(ids ...**string) {
+	if cd == nil || len(cd.splitRequestOnlyRateLimitIDs) == 0 {
+		return
+	}
+	for _, id := range ids {
+		if *id != nil && cd.splitRequestOnlyRateLimitIDs[**id] {
+			*id = nil
+		}
+	}
+}
+
+// validateGovernanceRequestLimits applies the API's request limit rules to the request limits
+// config.json declares: governance.rate_limits[] items naming an owner through model_config_id,
+// team_id or customer_id. Each names exactly one owner the file declares, carries a request limit and
+// no token limit, takes a scope its owner can be charged for (the same classes as budgets: any scope
+// on a team, a customer or a holder-level model config for all models and no provider, "shared" or
+// "model" on a narrower model config), and no owner declares two with the same reset duration and scope.
+func validateGovernanceRequestLimits(configData *ConfigData) error {
+	if configData == nil || configData.Governance == nil {
+		return nil
+	}
+	gov := configData.Governance
+	modelConfigs := make(map[string]*configstoreTables.TableModelConfig, len(gov.ModelConfigs))
+	for i := range gov.ModelConfigs {
+		modelConfigs[gov.ModelConfigs[i].ID] = &gov.ModelConfigs[i]
+	}
+	teams := make(map[string]bool, len(gov.Teams))
+	for _, team := range gov.Teams {
+		teams[team.ID] = true
+	}
+	customers := make(map[string]bool, len(gov.Customers))
+	for _, customer := range gov.Customers {
+		customers[customer.ID] = true
+	}
+	// A holder declared by name owns the request limit split from its rate limit under its stored id.
+	for holder := range configData.namedHolderIDs {
+		switch holder.kind {
+		case "team":
+			teams[holder.id] = true
+		case "customer":
+			customers[holder.id] = true
+		}
+	}
+	seen := make(map[string]string)
+	for i := range gov.RateLimits {
+		rl := &gov.RateLimits[i]
+		if !rl.IsRequestLimit() {
+			if rl.Scope.Normalize() != configstoreTables.LimitScopeShared {
+				return fmt.Errorf("governance rate limit %s: scope %s is only valid on a request limit owned through model_config_id, team_id or customer_id", rl.ID, rl.Scope)
+			}
+			continue
+		}
+		owners := 0
+		var owner string
+		mcpApplicable := true
+		if rl.ModelConfigID != nil {
+			owners++
+			owner = "model_config " + *rl.ModelConfigID
+			mc := modelConfigs[*rl.ModelConfigID]
+			if mc == nil {
+				return fmt.Errorf("governance rate limit %s: model config %s is not declared in governance.model_configs", rl.ID, *rl.ModelConfigID)
+			}
+			mcpApplicable = mc.IsHolderLevel()
+		}
+		if rl.TeamID != nil {
+			owners++
+			owner = "team " + *rl.TeamID
+			if !teams[*rl.TeamID] {
+				return fmt.Errorf("governance rate limit %s: team %s is not declared in governance.teams", rl.ID, *rl.TeamID)
+			}
+		}
+		if rl.CustomerID != nil {
+			owners++
+			owner = "customer " + *rl.CustomerID
+			if !customers[*rl.CustomerID] {
+				return fmt.Errorf("governance rate limit %s: customer %s is not declared in governance.customers", rl.ID, *rl.CustomerID)
+			}
+		}
+		if owners > 1 {
+			return fmt.Errorf("governance rate limit %s: a request limit belongs to exactly one of model_config_id, team_id and customer_id", rl.ID)
+		}
+		if rl.TokenMaxLimit != nil || rl.TokenResetDuration != nil {
+			return fmt.Errorf("governance rate limit %s on %s: a request limit cannot carry a token limit; declare the token limit as the owner's rate_limit_id", rl.ID, owner)
+		}
+		if rl.RequestMaxLimit == nil || rl.RequestResetDuration == nil {
+			return fmt.Errorf("governance rate limit %s on %s: a request limit requires request_max_limit and request_reset_duration", rl.ID, owner)
+		}
+		if *rl.RequestMaxLimit <= 0 {
+			return fmt.Errorf("governance rate limit %s on %s: request_max_limit must be greater than zero", rl.ID, owner)
+		}
+		if d, err := configstoreTables.ParseDuration(*rl.RequestResetDuration); err != nil || d <= 0 {
+			return fmt.Errorf("governance rate limit %s on %s: invalid request_reset_duration %q (must be a positive duration)", rl.ID, owner, *rl.RequestResetDuration)
+		}
+		if !rl.Scope.IsValid() {
+			return fmt.Errorf("governance rate limit %s on %s: invalid scope %q (must be one of shared, model, mcp)", rl.ID, owner, rl.Scope)
+		}
+		if !mcpApplicable && rl.Scope.Normalize() == configstoreTables.LimitScopeMCP {
+			return fmt.Errorf("governance rate limit %s on %s: scope %s is only supported on request limits that apply to all models and providers", rl.ID, owner, rl.Scope)
+		}
+		key := owner + "\x00" + configstoreTables.LimitPeriodKey(*rl.RequestResetDuration, rl.Scope)
+		if other, dup := seen[key]; dup {
+			return fmt.Errorf("governance rate limits %s and %s on %s: duplicate request_reset_duration %s for scope %s", other, rl.ID, owner, *rl.RequestResetDuration, rl.Scope.Normalize())
+		}
+		seen[key] = rl.ID
+	}
+	return nil
+}
+
 // promoteDeprecatedCalendarAligned lifts the legacy per-budget / per-rate-limit
 // calendar_aligned input to the owning VK or Team. Owner wins if already true;
 // otherwise OR across descendants (own budgets/rate-limit + every provider
@@ -1481,6 +2043,15 @@ func LoadConfig(ctx context.Context, configDirPath string) (*Config, error) {
 	config.SetupToken = resolveSetupToken(&configData)
 	// 2. Stores (config, logs, vector) — creates defaults for absent configs
 	if err := initStores(ctx, config, &configData, configDBPath, logsDBPath); err != nil {
+		return nil, err
+	}
+	// 2a. config.json's legacy request limits, split once the store can show which rows other holders share
+	var configDB *gorm.DB
+	if config.ConfigStore != nil {
+		configDB = config.ConfigStore.DB()
+	}
+	splitLegacyGovernanceRequestLimits(&configData, configDB)
+	if err := validateGovernanceRequestLimits(&configData); err != nil {
 		return nil, err
 	}
 	// 4. Client config (store → file → defaults)
@@ -4587,6 +5158,10 @@ func mergeGovernanceConfig(ctx context.Context, config *Config, configData *Conf
 	// hash is not updated on UI/API edits, so a hash match cannot prove the DB row
 	// is unchanged; forcing the sync reverts UI drift back to the file values.
 	forceFileSync := configData.isConfigJSONSourceOfTruth()
+	// A key's legacy request limit moves onto its tier, which only a config store holds.
+	if config.ConfigStore != nil {
+		splitLegacyVirtualKeyRequestLimits(configData, config.ConfigStore.DB())
+	}
 	// Merge Budgets by ID with hash comparison
 	budgetsToAdd := make([]configstoreTables.TableBudget, 0)
 	budgetsToUpdate := make([]configstoreTables.TableBudget, 0)
@@ -4675,6 +5250,7 @@ func mergeGovernanceConfig(ctx context.Context, config *Config, configData *Conf
 			continue
 		}
 		configData.Governance.Customers[i].ConfigHash = fileCustomerHash
+		configData.clearSplitRateLimitRefs(&configData.Governance.Customers[i].RateLimitID)
 
 		found := false
 		for j, existingCustomer := range governanceConfig.Customers {
@@ -4715,6 +5291,7 @@ func mergeGovernanceConfig(ctx context.Context, config *Config, configData *Conf
 			continue
 		}
 		configData.Governance.Teams[i].ConfigHash = fileTeamHash
+		configData.clearSplitRateLimitRefs(&configData.Governance.Teams[i].RateLimitID)
 
 		found := false
 		for j, existingTeam := range governanceConfig.Teams {
@@ -4754,6 +5331,8 @@ func mergeGovernanceConfig(ctx context.Context, config *Config, configData *Conf
 	// update was skipped for the same reason aren't tracked here — their prior DB
 	// row is untouched and still valid, so their ID stays a legitimate reference.
 	skippedNewVirtualKeyIDs := make(map[string]bool)
+	// Keys whose only change is a request limit config.json gives their tier (tierRequestLimitsDiffer).
+	tierRequestLimitsOnly := make([]string, 0)
 	for i, newVirtualKey := range configData.Governance.VirtualKeys {
 		fileVKHash, err := configstore.GenerateVirtualKeyHash(newVirtualKey)
 		if err != nil {
@@ -4761,6 +5340,11 @@ func mergeGovernanceConfig(ctx context.Context, config *Config, configData *Conf
 			continue
 		}
 		configData.Governance.VirtualKeys[i].ConfigHash = fileVKHash
+		// After the hash, which the stored one was taken from as declared, before the split.
+		configData.clearSplitRateLimitRefs(&configData.Governance.VirtualKeys[i].RateLimitID)
+		for j := range configData.Governance.VirtualKeys[i].ProviderConfigs {
+			configData.clearSplitRateLimitRefs(&configData.Governance.VirtualKeys[i].ProviderConfigs[j].RateLimitID)
+		}
 		// Preparing hash
 		found := false
 		for j, existingVirtualKey := range governanceConfig.VirtualKeys {
@@ -4843,6 +5427,11 @@ func mergeGovernanceConfig(ctx context.Context, config *Config, configData *Conf
 					}
 					virtualKeysToUpdate = append(virtualKeysToUpdate, configData.Governance.VirtualKeys[i])
 					governanceConfig.VirtualKeys[j] = configData.Governance.VirtualKeys[i]
+				} else if config.tierRequestLimitsDiffer(ctx, configData, existingVirtualKey) {
+					// Only the request limit the file gives the key's tier changed: write that alone and
+					// keep the key as the dashboard left it.
+					logger.Debug("request limit of virtual key %s changed in config file, syncing it alone", existingVirtualKey.ID)
+					tierRequestLimitsOnly = append(tierRequestLimitsOnly, existingVirtualKey.ID)
 				} else {
 					logger.Debug("config hash matches for virtual key %s, keeping DB config", newVirtualKey.ID)
 				}
@@ -5068,6 +5657,8 @@ func mergeGovernanceConfig(ctx context.Context, config *Config, configData *Conf
 			continue
 		}
 		configData.Governance.ModelConfigs[i].ConfigHash = fileModelConfigHash
+		// After the hash: the stored one was taken from the file as declared, before the split.
+		configData.clearSplitRateLimitRefs(&configData.Governance.ModelConfigs[i].RateLimitID)
 
 		found := false
 		for j, existingModelConfig := range governanceConfig.ModelConfigs {
@@ -5089,6 +5680,8 @@ func mergeGovernanceConfig(ctx context.Context, config *Config, configData *Conf
 				// The declared id is never written, so anything the file pointed at it must follow.
 				remapModelConfigBudgetRefs(newModelConfig.ID, governanceConfig.ModelConfigs[j].ID,
 					configData.Governance.Budgets, budgetsToAdd, budgetsToUpdate)
+				remapModelConfigRequestLimitRefs(newModelConfig.ID, governanceConfig.ModelConfigs[j].ID,
+					configData.Governance.RateLimits, rateLimitsToAdd, rateLimitsToUpdate)
 				adoptedHash := governanceConfig.ModelConfigs[j].ConfigHash
 				configData.Governance.ModelConfigs[i].ID = governanceConfig.ModelConfigs[j].ID
 				// The id never matches, so without the hash check every boot would rewrite the row
@@ -5150,7 +5743,7 @@ func mergeGovernanceConfig(ctx context.Context, config *Config, configData *Conf
 		len(rateLimitsToAdd) > 0 || len(rateLimitsToUpdate) > 0 ||
 		len(customersToAdd) > 0 || len(customersToUpdate) > 0 ||
 		len(teamsToAdd) > 0 || len(teamsToUpdate) > 0 ||
-		len(virtualKeysToAdd) > 0 || len(virtualKeysToUpdate) > 0 ||
+		len(virtualKeysToAdd) > 0 || len(virtualKeysToUpdate) > 0 || len(tierRequestLimitsOnly) > 0 ||
 		len(routingRulesToAdd) > 0 || len(routingRulesToUpdate) > 0 || len(routingRulesToDelete) > 0 ||
 		len(pricingOverridesToAdd) > 0 || len(pricingOverridesToUpdate) > 0 ||
 		len(modelConfigsToAdd) > 0 || len(modelConfigsToUpdate) > 0 ||
@@ -5178,15 +5771,102 @@ func mergeGovernanceConfig(ctx context.Context, config *Config, configData *Conf
 			complexityAnalyzerConfigToUpdate,
 			forceFileSync,
 			declaredBudgetIDs(configData.Governance.Budgets),
-			configData.Governance)
+			configData.Governance,
+			configData.legacyTierRequestLimits,
+			tierRequestLimitsOnly)
 		if err != nil {
 			logger.Fatal("failed to sync governance config: %v", err)
 		}
 		config.GovernanceFileSync = fileSync
 	}
 
+	if config.ConfigStore != nil {
+		removeStaleLegacyRequestLimits(ctx, config, configData)
+	}
 	if configData.isConfigJSONSourceOfTruth() {
 		pruneGovernanceConfigToFile(ctx, config, configData)
+	}
+}
+
+// removeStaleLegacyRequestLimits runs deleteStaleLegacyRequestLimits on every load, not only on one
+// that changed a row: a rate limit stripped of its request fields hashes as the row the split already
+// stored, so nothing else is written, yet the request limit split from it is no longer declared.
+//
+// Without the sync's governed-entity reads, it leaves alone what another owner may govern: a team
+// or customer the guard names (or cannot answer for), and a virtual key's model configs. Under
+// source_of_truth config.json nothing is governed.
+func removeStaleLegacyRequestLimits(ctx context.Context, config *Config, configData *ConfigData) {
+	sourceOfTruth := configData.isConfigJSONSourceOfTruth()
+	governed := func(kind, id string) bool {
+		governedBy, err := governance.LegacyLimitsGovernedBy(ctx, kind, id)
+		return err != nil || governedBy != ""
+	}
+	skip := func(rl configstoreTables.TableRateLimit) bool {
+		if sourceOfTruth {
+			return false
+		}
+		switch {
+		case rl.TeamID != nil:
+			return governed(governance.LegacyLimitHolderTeam, *rl.TeamID)
+		case rl.CustomerID != nil:
+			return governed(governance.LegacyLimitHolderCustomer, *rl.CustomerID)
+		}
+		return false
+	}
+	fileRateLimitIDs := declarationsInFile(configData.Governance).rateLimitIDs
+	// A virtual key's model config is left alone when an access profile governs the key (or the lookup
+	// cannot say); one whose key nothing governs is cleaned up like any other owner's.
+	keyOfModelConfig := make(map[string]string)
+	for _, mc := range configData.Governance.ModelConfigs {
+		if mc.Scope == configstoreTables.ModelConfigScopeVirtualKey && mc.ScopeID != nil && !sourceOfTruth {
+			keyOfModelConfig[mc.ID] = *mc.ScopeID
+		}
+	}
+	keyGoverned := make(map[string]bool)
+	isKeyGoverned := func(vkID string) bool {
+		if answer, ok := keyGoverned[vkID]; ok {
+			return answer
+		}
+		answer := true // unknown stays protected
+		if vk, err := config.ConfigStore.GetVirtualKey(ctx, vkID); err == nil && vk != nil {
+			if kind, id := virtualKeyLegacyLimitHolder(vk); kind == "" {
+				answer = false
+			} else {
+				answer = governed(kind, id)
+			}
+		}
+		keyGoverned[vkID] = answer
+		return answer
+	}
+	skipOwner := func(rl configstoreTables.TableRateLimit) bool {
+		if rl.ModelConfigID != nil && !sourceOfTruth {
+			if vkID, ok := keyOfModelConfig[*rl.ModelConfigID]; ok && isKeyGoverned(vkID) {
+				return true
+			}
+		}
+		return skip(rl)
+	}
+	skipHolder := func(kind, id string) bool {
+		switch kind {
+		case "team":
+			return skip(configstoreTables.TableRateLimit{TeamID: &id})
+		case "customer":
+			return skip(configstoreTables.TableRateLimit{CustomerID: &id})
+		case "model_config":
+			return skipOwner(configstoreTables.TableRateLimit{ModelConfigID: &id})
+		case "virtual_key":
+			return !sourceOfTruth && isKeyGoverned(id)
+		}
+		return false
+	}
+	if err := config.ConfigStore.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
+		// Links first: a holder that gets its row back has its derived row's usage carried to it below.
+		if err := reconcileLegacyHolderLinks(ctx, tx, configData, skipHolder); err != nil {
+			return err
+		}
+		return deleteStaleLegacyRequestLimits(ctx, config.ConfigStore, tx, configData.Governance, fileRateLimitIDs, configData.legacyTierRequestLimits, keyOfModelConfig, skipOwner)
+	}); err != nil {
+		logger.Error("failed to remove request limits config.json no longer derives; they stay until the next boot: %v", err)
 	}
 }
 
@@ -5408,6 +6088,20 @@ func remapModelConfigBudgetRefs(declaredID, adoptedID string, sets ...[]configst
 	}
 }
 
+// remapModelConfigRequestLimitRefs is remapModelConfigBudgetRefs for request limits.
+func remapModelConfigRequestLimitRefs(declaredID, adoptedID string, sets ...[]configstoreTables.TableRateLimit) {
+	if declaredID == adoptedID {
+		return
+	}
+	for _, set := range sets {
+		for i := range set {
+			if set[i].ModelConfigID != nil && *set[i].ModelConfigID == declaredID {
+				set[i].ModelConfigID = &adoptedID
+			}
+		}
+	}
+}
+
 // fileGovernanceDeclarations are the rows config.json declares. Read from the file, not from the
 // change sets: a row whose hash matches is in neither, and is still declared.
 type fileGovernanceDeclarations struct {
@@ -5522,11 +6216,13 @@ func virtualKeyLimitModelConfigs(existing *configstore.GovernanceConfig, configD
 		if vk.ID == "" {
 			continue
 		}
-		if len(vk.Budgets) > 0 || vk.RateLimitID != nil {
+		// A request limit split from the key's legacy rate limit declares the tier too: the split
+		// cleared the key's reference when the row held nothing else.
+		if len(vk.Budgets) > 0 || vk.RateLimitID != nil || len(configData.legacyTierRequestLimits[legacyTierKey{vkID: vk.ID}]) > 0 {
 			declared[vk.ID+"\x00"] = true
 		}
 		for _, pc := range vk.ProviderConfigs {
-			if len(pc.Budgets) > 0 || pc.RateLimitID != nil {
+			if len(pc.Budgets) > 0 || pc.RateLimitID != nil || len(configData.legacyTierRequestLimits[legacyTierKey{vkID: vk.ID, provider: pc.Provider}]) > 0 {
 				declared[vk.ID+"\x00"+pc.Provider] = true
 			}
 		}
@@ -5582,7 +6278,18 @@ func virtualKeyLimitModelConfigs(existing *configstore.GovernanceConfig, configD
 func governanceLimitsToKeep(ctx context.Context, store configstore.ConfigStore, existing *configstore.GovernanceConfig, configData *ConfigData, protected map[string]bool, tierOfProviderConfig map[uint]string, tiersKnown bool) (budgets, rateLimits map[string]bool) {
 	budgets, rateLimits = map[string]bool{}, map[string]bool{}
 	ownedByKeptModelConfig := virtualKeyLimitModelConfigs(existing, configData, protected, tierOfProviderConfig, tiersKnown)
+	// Kept model configs whose request limits are all kept: a scope the file does not manage, and a
+	// key's tiers when the file does not speak for them or a guard protects the key. On any other kept
+	// tier only a request limit the API created (no config_hash) stays; one config.json wrote and no
+	// longer declares is the file's to remove.
+	fileSpeaksForLimits := configData.governanceSectionPresent("virtual_keys") &&
+		configData.governanceSectionPresent("budgets") && tiersKnown
+	keptWhole := map[string]bool{}
 	for _, mc := range existing.ModelConfigs {
+		if !fileManagedModelConfigScope(mc.Scope) ||
+			(mc.Scope == configstoreTables.ModelConfigScopeVirtualKey && mc.ScopeID != nil && (!fileSpeaksForLimits || protected[*mc.ScopeID])) {
+			keptWhole[mc.ID] = true
+		}
 		if fileManagedModelConfigScope(mc.Scope) && !ownedByKeptModelConfig[mc.ID] {
 			continue
 		}
@@ -5595,6 +6302,12 @@ func governanceLimitsToKeep(ctx context.Context, store configstore.ConfigStore, 
 		}
 	}
 	markInlineGovernanceLimits(configData.Governance, budgets, rateLimits)
+	// Request limits split from a key's own legacy rate limit live on its tier, outside rate_limits.
+	for _, rules := range configData.legacyTierRequestLimits {
+		for _, rule := range rules {
+			rateLimits[rule.ID] = true
+		}
+	}
 
 	var budgetCandidates, rateLimitCandidates []string
 	if configData.governanceSectionPresent("budgets") {
@@ -5617,6 +6330,10 @@ func governanceLimitsToKeep(ctx context.Context, store configstore.ConfigStore, 
 			declared[rateLimit.ID] = true
 		}
 		for _, rateLimit := range existing.RateLimits {
+			if rateLimit.ModelConfigID != nil && ownedByKeptModelConfig[*rateLimit.ModelConfigID] &&
+				(keptWhole[*rateLimit.ModelConfigID] || rateLimit.ConfigHash == "") {
+				rateLimits[rateLimit.ID] = true
+			}
 			if rateLimit.ID != "" && !declared[rateLimit.ID] && !rateLimits[rateLimit.ID] {
 				rateLimitCandidates = append(rateLimitCandidates, rateLimit.ID)
 			}
@@ -6015,7 +6732,10 @@ func pruneGovernanceConfigToFile(ctx context.Context, config *Config, configData
 				// to avoid creating/deleting client-id 0 associations.
 				vk.MCPConfigs = resolveMCPConfigClientIDs(ctx, config.ConfigStore, vk.MCPConfigs, vk.ID)
 				if err := reconcileVirtualKeyAssociations(ctx, config.ConfigStore, tx, vk.ID, vk.Budgets, vk.RateLimitID, vk.CalendarAligned, func(pending virtualKeyTierState) error {
-					return writeVirtualKeyTierLimits(ctx, config.ConfigStore, tx, pending, prunedFileRateLimitIDs)
+					if pending.keyRateLimitStated {
+						pending.requestLimits = configData.legacyTierRequestLimits[newLegacyTierKey(pending.vkID, pending.provider)]
+					}
+					return writeVirtualKeyTierLimits(ctx, config.ConfigStore, tx, pending, prunedFileRateLimitIDs, true)
 				}, prunedFileModelConfigIDs, prunedFileTiers, prunedFileRateLimitIDs, true, vk.ProviderConfigs, vk.MCPConfigs, budgetIDsInConfigJSON); err != nil {
 					return fmt.Errorf("failed to reconcile associations for virtual key %s: %w", vk.ID, err)
 				}
@@ -6204,6 +6924,8 @@ func updateGovernanceConfigInStore(
 	isConfigJSONSourceOfTruth bool,
 	budgetIDsInConfigJSON map[string]bool,
 	governanceInConfigJSON *configstore.GovernanceConfig,
+	legacyTierRequestLimits map[legacyTierKey][]configstoreTables.TableRateLimit,
+	tierRequestLimitsOnly []string,
 ) error {
 	logger.Debug("updating governance config in store with merged items")
 	err := config.ConfigStore.ExecuteTransaction(ctx, func(tx *gorm.DB) error {
@@ -6232,7 +6954,8 @@ func updateGovernanceConfigInStore(
 		// to be known before the file's version of it is applied.
 		governed, err := governedEntitiesInConfig(ctx, config, tx, isConfigJSONSourceOfTruth,
 			rateLimitsToAdd, rateLimitsToUpdate, customersToAdd, customersToUpdate, teamsToAdd, teamsToUpdate,
-			governanceInConfigJSON, virtualKeysToAdd, virtualKeysToUpdate, budgetsToAdd, budgetsToUpdate, modelConfigsToAdd, modelConfigsToUpdate)
+			governanceInConfigJSON, virtualKeysToAdd, virtualKeysToUpdate, budgetsToAdd, budgetsToUpdate, modelConfigsToAdd, modelConfigsToUpdate,
+			tierRequestLimitsOnly)
 		if err != nil {
 			return err
 		}
@@ -6289,9 +7012,17 @@ func updateGovernanceConfigInStore(
 			}
 		}
 
+		// Request limits name their owner, so they are written once every owner the file declares exists.
+		pendingRequestLimitsToAdd := make([]configstoreTables.TableRateLimit, 0)
+		pendingRequestLimitsToUpdate := make([]configstoreTables.TableRateLimit, 0)
+
 		// Create rate limits
 		for _, rateLimit := range rateLimitsToAdd {
 			if governed.rateLimits[rateLimit.ID] {
+				continue
+			}
+			if rateLimit.IsRequestLimit() {
+				pendingRequestLimitsToAdd = append(pendingRequestLimitsToAdd, rateLimit)
 				continue
 			}
 			if err := config.ConfigStore.CreateRateLimit(ctx, &rateLimit, tx); err != nil {
@@ -6305,6 +7036,10 @@ func updateGovernanceConfigInStore(
 			// below, and writing the file's numbers onto it would apply the limits that preservation
 			// exists to keep out.
 			if governed.rateLimits[rateLimit.ID] {
+				continue
+			}
+			if rateLimit.IsRequestLimit() {
+				pendingRequestLimitsToUpdate = append(pendingRequestLimitsToUpdate, rateLimit)
 				continue
 			}
 			if err := config.ConfigStore.UpdateRateLimit(ctx, &rateLimit, tx); err != nil {
@@ -6764,6 +7499,42 @@ func updateGovernanceConfigInStore(
 			}
 		}
 
+		// A governed owner keeps the limits it has, as its own budgets and rate limit do.
+		fileModelConfigs := make(map[string]*configstoreTables.TableModelConfig)
+		if governanceInConfigJSON != nil {
+			for i := range governanceInConfigJSON.ModelConfigs {
+				fileModelConfigs[governanceInConfigJSON.ModelConfigs[i].ID] = &governanceInConfigJSON.ModelConfigs[i]
+			}
+		}
+		skipRequestLimit := func(rl configstoreTables.TableRateLimit) bool {
+			switch {
+			case rl.TeamID != nil:
+				return governed.teams[*rl.TeamID]
+			case rl.CustomerID != nil:
+				return governed.customers[*rl.CustomerID]
+			case rl.ModelConfigID != nil:
+				mc := fileModelConfigs[*rl.ModelConfigID]
+				return mc != nil && governed.skipModelConfig(mc)
+			}
+			return false
+		}
+		for _, rateLimit := range pendingRequestLimitsToAdd {
+			if skipRequestLimit(rateLimit) {
+				continue
+			}
+			if err := config.ConfigStore.CreateRateLimit(ctx, &rateLimit, tx); err != nil {
+				return fmt.Errorf("failed to create request limit %s: %w", rateLimit.ID, err)
+			}
+		}
+		for _, rateLimit := range pendingRequestLimitsToUpdate {
+			if skipRequestLimit(rateLimit) {
+				continue
+			}
+			if err := config.ConfigStore.UpdateRateLimit(ctx, &rateLimit, tx); err != nil {
+				return fmt.Errorf("failed to update request limit %s: %w", rateLimit.ID, err)
+			}
+		}
+
 		// Held back until the file's own model configs exist, so find-or-create resolves to them.
 		for _, pending := range pendingVKLimits {
 			// A governed key's tier is the profile's: creating one here would restore by another route
@@ -6771,8 +7542,29 @@ func updateGovernanceConfigInStore(
 			if governed.skipKeyLimits(pending.vkID) {
 				continue
 			}
-			if err := writeVirtualKeyTierLimits(ctx, config.ConfigStore, tx, pending, fileRateLimitIDs); err != nil {
+			if pending.keyRateLimitStated {
+				pending.requestLimits = legacyTierRequestLimits[newLegacyTierKey(pending.vkID, pending.provider)]
+			}
+			if err := writeVirtualKeyTierLimits(ctx, config.ConfigStore, tx, pending, fileRateLimitIDs, isConfigJSONSourceOfTruth); err != nil {
 				return fmt.Errorf("failed to write limits of virtual key %s: %w", pending.vkID, err)
+			}
+		}
+		// A key whose only change is its tier's request limit: the tier gets that limit and nothing else.
+		for _, vkID := range tierRequestLimitsOnly {
+			if governed.skipKeyLimits(vkID) {
+				continue
+			}
+			for key, rules := range legacyTierRequestLimits {
+				if key.vkID != vkID {
+					continue
+				}
+				state := virtualKeyTierState{vkID: vkID, requestLimits: rules}
+				if key.provider != "" {
+					state.provider = &key.provider
+				}
+				if err := writeVirtualKeyTierLimits(ctx, config.ConfigStore, tx, state, fileRateLimitIDs, isConfigJSONSourceOfTruth); err != nil {
+					return fmt.Errorf("failed to write request limits of virtual key %s: %w", vkID, err)
+				}
 			}
 		}
 
@@ -8174,6 +8966,8 @@ type virtualKeyTierState struct {
 	keyCalendarAligned *bool
 	// The file's own declaration of this row. It owns every field it states.
 	declared *configstoreTables.TableModelConfig
+	// requestLimits were split from the key's legacy rate limit (see splitLegacyGovernanceRequestLimits).
+	requestLimits []configstoreTables.TableRateLimit
 }
 
 // calendarAlignment is the declaration's value when the file declares the row, else the key's.
@@ -8197,9 +8991,16 @@ func (s virtualKeyTierState) rateLimit() (*string, bool) {
 }
 
 // writeVirtualKeyTierLimits writes one tier's declared budgets and rate limit onto its model config.
-func writeVirtualKeyTierLimits(ctx context.Context, store configstore.ConfigStore, tx *gorm.DB, state virtualKeyTierState, fileRateLimitIDs map[string]bool) error {
+// forceFileValues writes the tier's request limits even where the file has not changed them, as under
+// source_of_truth config.json.
+func writeVirtualKeyTierLimits(ctx context.Context, store configstore.ConfigStore, tx *gorm.DB, state virtualKeyTierState, fileRateLimitIDs map[string]bool, forceFileValues bool) error {
+	if state.keyRateLimitStated {
+		if err := deleteStaleLegacyTierRequestLimits(ctx, store, tx, state, fileRateLimitIDs); err != nil {
+			return err
+		}
+	}
 	rateLimitID, rateLimitDeclared := state.rateLimit()
-	if len(state.budgets) == 0 && rateLimitID == nil {
+	if len(state.budgets) == 0 && rateLimitID == nil && len(state.requestLimits) == 0 {
 		// Nothing to hold: clear a tier that exists rather than minting one to hold nothing.
 		if rateLimitDeclared {
 			return clearFileOwnedTierRateLimitOf(ctx, tx, state.vkID, state.provider, fileRateLimitIDs)
@@ -8234,6 +9035,25 @@ func writeVirtualKeyTierLimits(ctx context.Context, store configstore.ConfigStor
 	if rateLimitID != nil {
 		if err := clearDirectRateLimitReference(ctx, tx, state.vkID, state.provider, *rateLimitID); err != nil {
 			return err
+		}
+	}
+	for i := range state.requestLimits {
+		rule := state.requestLimits[i]
+		rule.ModelConfigID, rule.TeamID, rule.CustomerID = &mcID, nil, nil
+		stored, err := store.GetRateLimit(ctx, rule.ID, tx)
+		switch {
+		case errors.Is(err, configstore.ErrNotFound):
+			err = store.CreateRateLimit(ctx, &rule, tx)
+		case err == nil:
+			// In split mode a rule the file has not changed on this tier keeps the dashboard's edits;
+			// under source_of_truth config.json the file's values are written whatever they replace.
+			if !forceFileValues && stored != nil && stored.ModelConfigID != nil && *stored.ModelConfigID == mcID && !tierRequestLimitChanged(rule, *stored) {
+				continue
+			}
+			err = store.UpdateRateLimit(ctx, &rule, tx)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to write request limit %s: %w", rule.ID, err)
 		}
 	}
 	for i := range state.budgets {
@@ -8275,6 +9095,377 @@ func writeVirtualKeyTierLimits(ctx context.Context, store configstore.ConfigStor
 			"provider_config_id": nil,
 		}).Error; err != nil {
 			return fmt.Errorf("failed to set the tier of budget %s: %w", budget.ID, err)
+		}
+	}
+	return nil
+}
+
+// deleteStaleLegacyRequestLimits removes the request limits a file-declared team, customer or model
+// config once took from a legacy rate limit (LegacyRequestLimitID(id) of a rate limit the file still
+// declares) when this load no longer derives them: the rate limit lost its request fields, or the
+// holder now names another one. Only those derived rows go; a request limit the API created has a
+// generated id and is never touched, and skip leaves a governed holder's rows alone.
+// declaredDerivedRequestLimitIDs is the id config.json's split gives the request limit of each rate limit it
+// declares. A derived id cannot be traced back by cutting a suffix off it: a long source id is shortened,
+// so the lookup runs from the declared ids forward.
+// The result maps each derived id to the rate limit it is split from.
+func declaredDerivedRequestLimitIDs(fileRateLimitIDs map[string]bool) map[string]string {
+	ids := make(map[string]string, len(fileRateLimitIDs))
+	for id, declared := range fileRateLimitIDs {
+		if declared {
+			ids[configstoreTables.LegacyRequestLimitID(id)] = id
+		}
+	}
+	return ids
+}
+
+// derivedRequestLimitIDs is the set of request limits this load splits from legacy rate limits: the
+// holders' (in governance.rate_limits) and the virtual key tiers'.
+func derivedRequestLimitIDs(gov *configstore.GovernanceConfig, legacyTierRequestLimits map[legacyTierKey][]configstoreTables.TableRateLimit) map[string]bool {
+	derived := make(map[string]bool)
+	for _, rl := range gov.RateLimits {
+		if rl.IsRequestLimit() {
+			derived[rl.ID] = true
+		}
+	}
+	for _, rules := range legacyTierRequestLimits {
+		for _, rule := range rules {
+			derived[rule.ID] = true
+		}
+	}
+	return derived
+}
+
+// carryLegacyRequestUsage hands a stale derived request limit's counter back to the rate limit it was
+// split from, when that row carries the request limit again (another holder now shares it, so it is no
+// longer split), before the derived row is deleted. Both rows are read under a row lock, so a usage
+// write cannot land between the read and the write. A counter counts only while its window is open
+// (requestCounterLive): an expired count is never carried, a live one beats an expired one, and of two
+// live ones the higher is kept (the source's on a tie), so merging never hands back quota. The carried
+// count takes its last reset, reset epoch and window anchor (created_at) along, so it is judged in its
+// own window: a source recreated by the file has a new created_at, which would close it at once.
+// Token accounting is untouched.
+func carryLegacyRequestUsage(ctx context.Context, tx *gorm.DB, rule configstoreTables.TableRateLimit, sourceID string) error {
+	var rows []configstoreTables.TableRateLimit
+	if err := rowsForUpdate(tx.WithContext(ctx)).Where("id IN ?", []string{rule.ID, sourceID}).Find(&rows).Error; err != nil {
+		return fmt.Errorf("failed to read rate limits %s and %s: %w", rule.ID, sourceID, err)
+	}
+	var from, to *configstoreTables.TableRateLimit
+	for i := range rows {
+		switch rows[i].ID {
+		case rule.ID:
+			from = &rows[i]
+		case sourceID:
+			to = &rows[i]
+		}
+	}
+	if from == nil || to == nil || to.RequestMaxLimit == nil || to.IsRequestLimit() {
+		return nil
+	}
+	aligned, err := requestLimitOwnerCalendarAligned(ctx, tx, *from)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	// Both counters count one limit, so each is judged under the reset duration that limit now has.
+	fromLive := requestCounterLive(to.RequestResetDuration, aligned, from.CreatedAt, from.RequestLastReset, now)
+	toLive := requestCounterLive(to.RequestResetDuration, aligned, to.CreatedAt, to.RequestLastReset, now)
+	if !fromLive || (toLive && to.RequestCurrentUsage >= from.RequestCurrentUsage) {
+		return nil
+	}
+	updates := map[string]any{
+		"request_current_usage":     from.RequestCurrentUsage,
+		"request_last_reset":        from.RequestLastReset,
+		"request_usage_reset_epoch": from.RequestUsageResetEpoch,
+	}
+	if !from.CreatedAt.IsZero() {
+		updates["created_at"] = from.CreatedAt
+	}
+	if err := tx.WithContext(ctx).Model(&configstoreTables.TableRateLimit{}).Where("id = ?", sourceID).UpdateColumns(updates).Error; err != nil {
+		return fmt.Errorf("failed to carry the usage of request limit %s to rate limit %s: %w", rule.ID, sourceID, err)
+	}
+	return nil
+}
+
+// rowsForUpdate locks the rows a query reads until the transaction ends, where the database has row
+// locks (Postgres); SQLite serializes writers already.
+func rowsForUpdate(tx *gorm.DB) *gorm.DB {
+	if tx.Dialector.Name() != "postgres" {
+		return tx
+	}
+	return tx.Clauses(clause.Locking{Strength: "UPDATE"})
+}
+
+// requestLimitOwnerCalendarAligned reports whether the team, customer or model config owning a request
+// limit is calendar aligned, which decides where its counter's window starts.
+func requestLimitOwnerCalendarAligned(ctx context.Context, tx *gorm.DB, rl configstoreTables.TableRateLimit) (bool, error) {
+	var table, id string
+	switch {
+	case rl.TeamID != nil:
+		table, id = configstoreTables.TableTeam{}.TableName(), *rl.TeamID
+	case rl.CustomerID != nil:
+		table, id = configstoreTables.TableCustomer{}.TableName(), *rl.CustomerID
+	case rl.ModelConfigID != nil:
+		table, id = configstoreTables.TableModelConfig{}.TableName(), *rl.ModelConfigID
+	default:
+		return false, nil
+	}
+	var aligned []bool
+	if err := tx.WithContext(ctx).Table(table).Where("id = ?", id).Limit(1).Pluck("calendar_aligned", &aligned).Error; err != nil {
+		return false, fmt.Errorf("failed to read the calendar alignment of %s %s: %w", table, id, err)
+	}
+	return len(aligned) > 0 && aligned[0], nil
+}
+
+// requestCounterLive reports whether a request counter last reset at lastReset is still in its window,
+// by the governance store's rule (rateLimitResetDue): the calendar period when calendarAligned and the
+// duration has one, else the rolling window anchored on the row's created_at (or lastReset without
+// one). A counter whose window has closed counts nothing; one without a valid duration never closes.
+func requestCounterLive(resetDuration *string, calendarAligned bool, anchor, lastReset, now time.Time) bool {
+	if resetDuration == nil {
+		return true
+	}
+	if calendarAligned && configstoreTables.IsCalendarAlignableDuration(*resetDuration) {
+		return !configstoreTables.GetCalendarPeriodStart(*resetDuration, now, configstoreTables.QuarterStartNotApplicable).After(lastReset)
+	}
+	duration, err := configstoreTables.ParseDuration(*resetDuration)
+	if err != nil || duration <= 0 {
+		return true
+	}
+	if anchor.IsZero() {
+		anchor = lastReset
+	}
+	return !configstoreTables.RollingWindowStart(anchor, duration, now).After(lastReset)
+}
+
+// reconcileLegacyHolderLinks brings the stored rate_limit_id of the holders config.json declares in
+// line with how this load splits their legacy rate limits. A holder whose hash is unchanged keeps the
+// link an earlier load wrote, which goes wrong when the split's layout changed since:
+//   - a link to a row the split now drops (it holds nothing but the request limit, which lives on the
+//     holder's derived row) is cleared, so the token limit the row no longer declares stops applying.
+//     This covers a key's tiers too.
+//   - a holder the file still links to a row it keeps (another holder now shares it, or it carries a
+//     token limit again) gets back the link an earlier split cleared, when the holder's derived row is
+//     still there: a team, customer or model config, and a key's tiers, whose link is replaced only
+//     when it is empty or names that derived row. A stale derived row then goes, its usage carried to
+//     the row first (carryLegacyRequestUsage).
+//
+// Only rate_limit_id is written; skip leaves a holder another owner governs alone.
+func reconcileLegacyHolderLinks(ctx context.Context, tx *gorm.DB, configData *ConfigData, skip func(kind, id string) bool) error {
+	gov := configData.Governance
+	if gov == nil {
+		return nil
+	}
+	dropped := make([]string, 0, len(configData.splitRequestOnlyRateLimitIDs))
+	for id, ok := range configData.splitRequestOnlyRateLimitIDs {
+		if ok {
+			dropped = append(dropped, id)
+		}
+	}
+	type holder struct {
+		kind, id    string
+		rateLimitID *string
+	}
+	tables := []struct {
+		table, owner string
+		holders      []holder
+	}{
+		{table: configstoreTables.TableTeam{}.TableName(), owner: "team_id"},
+		{table: configstoreTables.TableCustomer{}.TableName(), owner: "customer_id"},
+		{table: configstoreTables.TableModelConfig{}.TableName(), owner: "model_config_id"},
+	}
+	for _, team := range gov.Teams {
+		tables[0].holders = append(tables[0].holders, holder{"team", team.ID, team.RateLimitID})
+	}
+	for _, customer := range gov.Customers {
+		tables[1].holders = append(tables[1].holders, holder{"customer", customer.ID, customer.RateLimitID})
+	}
+	for _, mc := range gov.ModelConfigs {
+		tables[2].holders = append(tables[2].holders, holder{"model_config", mc.ID, mc.RateLimitID})
+	}
+	for _, t := range tables {
+		var ids []string
+		for _, h := range t.holders {
+			if h.id == "" || skip(h.kind, h.id) {
+				continue
+			}
+			ids = append(ids, h.id)
+			if h.rateLimitID == nil {
+				continue
+			}
+			derivedID := configstoreTables.LegacyRequestLimitID(*h.rateLimitID)
+			if err := tx.WithContext(ctx).Table(t.table).
+				Where("id = ? AND rate_limit_id IS NULL", h.id).
+				Where("EXISTS (SELECT 1 FROM governance_rate_limits WHERE id = ? AND "+t.owner+" = ?)", derivedID, h.id).
+				Where("EXISTS (SELECT 1 FROM governance_rate_limits WHERE id = ?)", *h.rateLimitID).
+				UpdateColumn("rate_limit_id", *h.rateLimitID).Error; err != nil {
+				return fmt.Errorf("failed to restore rate limit %s on %s %s: %w", *h.rateLimitID, h.kind, h.id, err)
+			}
+		}
+		if len(ids) > 0 && len(dropped) > 0 {
+			if err := tx.WithContext(ctx).Table(t.table).Where("id IN ? AND rate_limit_id IN ?", ids, dropped).
+				UpdateColumn("rate_limit_id", nil).Error; err != nil {
+				return fmt.Errorf("failed to clear dropped rate limits on %s: %w", t.table, err)
+			}
+		}
+	}
+	var keyIDs []string
+	for _, vk := range gov.VirtualKeys {
+		if vk.ID == "" || skip("virtual_key", vk.ID) {
+			continue
+		}
+		keyIDs = append(keyIDs, vk.ID)
+		if err := restoreTierRateLimit(ctx, tx, vk.ID, nil, vk.RateLimitID); err != nil {
+			return err
+		}
+		for _, pc := range vk.ProviderConfigs {
+			if err := restoreTierRateLimit(ctx, tx, vk.ID, &pc.Provider, pc.RateLimitID); err != nil {
+				return err
+			}
+		}
+	}
+	if len(keyIDs) == 0 || len(dropped) == 0 {
+		return nil
+	}
+	if err := tx.WithContext(ctx).Model(&configstoreTables.TableModelConfig{}).
+		Where("scope = ? AND scope_id IN ? AND model_name = ? AND rate_limit_id IN ?",
+			configstoreTables.ModelConfigScopeVirtualKey, keyIDs, configstoreTables.ModelConfigAllModels, dropped).
+		UpdateColumn("rate_limit_id", nil).Error; err != nil {
+		return fmt.Errorf("failed to clear dropped rate limits on virtual key tiers: %w", err)
+	}
+	return nil
+}
+
+// restoreTierRateLimit links a key's tier (its provider's when provider is set) back to the rate
+// limit the file links it to, when an earlier split cleared the link: the tier's link is empty or names
+// the derived row, and that derived row is on the tier. Any other link is left as it is.
+func restoreTierRateLimit(ctx context.Context, tx *gorm.DB, vkID string, provider, rateLimitID *string) error {
+	if rateLimitID == nil || *rateLimitID == "" {
+		return nil
+	}
+	derivedID := configstoreTables.LegacyRequestLimitID(*rateLimitID)
+	q := tx.WithContext(ctx).Model(&configstoreTables.TableModelConfig{}).
+		Where("scope = ? AND scope_id = ? AND model_name = ?", configstoreTables.ModelConfigScopeVirtualKey, vkID, configstoreTables.ModelConfigAllModels)
+	if provider == nil {
+		q = q.Where("provider IS NULL")
+	} else {
+		q = q.Where("provider = ?", *provider)
+	}
+	if err := q.Where("rate_limit_id IS NULL OR rate_limit_id = ?", derivedID).
+		Where("EXISTS (SELECT 1 FROM governance_rate_limits WHERE id = ? AND model_config_id = governance_model_configs.id)", derivedID).
+		Where("EXISTS (SELECT 1 FROM governance_rate_limits WHERE id = ?)", *rateLimitID).
+		UpdateColumn("rate_limit_id", *rateLimitID).Error; err != nil {
+		return fmt.Errorf("failed to restore rate limit %s on a tier of virtual key %s: %w", *rateLimitID, vkID, err)
+	}
+	return nil
+}
+
+func deleteStaleLegacyRequestLimits(ctx context.Context, store configstore.ConfigStore, tx *gorm.DB, governanceInConfigJSON *configstore.GovernanceConfig, fileRateLimitIDs map[string]bool, legacyTierRequestLimits map[legacyTierKey][]configstoreTables.TableRateLimit, keyOfModelConfig map[string]string, skip func(configstoreTables.TableRateLimit) bool) error {
+	if governanceInConfigJSON == nil {
+		return nil
+	}
+	derived := derivedRequestLimitIDs(governanceInConfigJSON, legacyTierRequestLimits)
+	derivedOfDeclared := declaredDerivedRequestLimitIDs(fileRateLimitIDs)
+	var teamIDs, customerIDs, modelConfigIDs []string
+	for _, team := range governanceInConfigJSON.Teams {
+		if team.ID != "" {
+			teamIDs = append(teamIDs, team.ID)
+		}
+	}
+	for _, customer := range governanceInConfigJSON.Customers {
+		if customer.ID != "" {
+			customerIDs = append(customerIDs, customer.ID)
+		}
+	}
+	for _, mc := range governanceInConfigJSON.ModelConfigs {
+		if mc.ID != "" {
+			modelConfigIDs = append(modelConfigIDs, mc.ID)
+		}
+	}
+	// A declared key's own tiers (its model configs, which the file does not name) hold the request
+	// limits split from its rate limits. The key hashes unchanged when only the rate limit lost its
+	// request fields, so nothing else visits those tiers; keyOfModelConfig lets skip tell whose they are.
+	var keyIDs []string
+	for _, vk := range governanceInConfigJSON.VirtualKeys {
+		if vk.ID != "" {
+			keyIDs = append(keyIDs, vk.ID)
+		}
+	}
+	if len(keyIDs) > 0 {
+		var tiers []configstoreTables.TableModelConfig
+		if err := tx.WithContext(ctx).Select("id", "scope_id").
+			Where("scope = ? AND scope_id IN ? AND model_name = ?", configstoreTables.ModelConfigScopeVirtualKey, keyIDs, configstoreTables.ModelConfigAllModels).
+			Find(&tiers).Error; err != nil {
+			return fmt.Errorf("failed to read the tiers of declared virtual keys: %w", err)
+		}
+		for _, tier := range tiers {
+			if tier.ScopeID != nil {
+				keyOfModelConfig[tier.ID] = *tier.ScopeID
+				modelConfigIDs = append(modelConfigIDs, tier.ID)
+			}
+		}
+	}
+	for _, owners := range []struct {
+		column string
+		ids    []string
+	}{{"team_id", teamIDs}, {"customer_id", customerIDs}, {"model_config_id", modelConfigIDs}} {
+		if len(owners.ids) == 0 {
+			continue
+		}
+		var held []configstoreTables.TableRateLimit
+		if err := tx.WithContext(ctx).Where(owners.column+" IN ?", owners.ids).Find(&held).Error; err != nil {
+			return fmt.Errorf("failed to read request limits by %s: %w", owners.column, err)
+		}
+		for _, rule := range held {
+			source := derivedOfDeclared[rule.ID]
+			if source == "" || derived[rule.ID] || skip(rule) {
+				continue
+			}
+			if err := carryLegacyRequestUsage(ctx, tx, rule, source); err != nil {
+				return err
+			}
+			if err := store.DeleteRateLimit(ctx, rule.ID, tx); err != nil && !errors.Is(err, configstore.ErrNotFound) {
+				return fmt.Errorf("failed to delete stale request limit %s: %w", rule.ID, err)
+			}
+		}
+	}
+	return nil
+}
+
+// deleteStaleLegacyTierRequestLimits removes from a key's tier the request limits once split from a
+// legacy rate limit the file still declares but no longer gives request fields, or no longer links
+// to the key. Only those derived rows go: LegacyRequestLimitID(id) of a rate limit config.json
+// declares and state.requestLimits no longer carries. A request limit the API created has a
+// generated id and is never touched, as clearFileOwnedTierRateLimit leaves an API rate limit alone.
+func deleteStaleLegacyTierRequestLimits(ctx context.Context, store configstore.ConfigStore, tx *gorm.DB, state virtualKeyTierState, fileRateLimitIDs map[string]bool) error {
+	tier := tx.WithContext(ctx).Model(&configstoreTables.TableModelConfig{}).Select("id").
+		Where("scope = ? AND scope_id = ? AND model_name = ?",
+			configstoreTables.ModelConfigScopeVirtualKey, state.vkID, configstoreTables.ModelConfigAllModels)
+	if state.provider == nil {
+		tier = tier.Where("provider IS NULL")
+	} else {
+		tier = tier.Where("provider = ?", *state.provider)
+	}
+	var held []configstoreTables.TableRateLimit
+	if err := tx.WithContext(ctx).Where("model_config_id IN (?)", tier).Find(&held).Error; err != nil {
+		return fmt.Errorf("failed to read request limits of the tier of virtual key %s: %w", state.vkID, err)
+	}
+	carried := make(map[string]bool, len(state.requestLimits))
+	for _, rule := range state.requestLimits {
+		carried[rule.ID] = true
+	}
+	derivedOfDeclared := declaredDerivedRequestLimitIDs(fileRateLimitIDs)
+	for _, rule := range held {
+		// A rule whose own id the file still declares (a model config's split, say) is not stale.
+		source := derivedOfDeclared[rule.ID]
+		if source == "" || carried[rule.ID] || fileRateLimitIDs[rule.ID] {
+			continue
+		}
+		if err := carryLegacyRequestUsage(ctx, tx, rule, source); err != nil {
+			return err
+		}
+		if err := store.DeleteRateLimit(ctx, rule.ID, tx); err != nil && !errors.Is(err, configstore.ErrNotFound) {
+			return fmt.Errorf("failed to delete stale request limit %s: %w", rule.ID, err)
 		}
 	}
 	return nil
@@ -10995,6 +12186,7 @@ func governedEntitiesInConfig(
 	virtualKeysToAdd, virtualKeysToUpdate []configstoreTables.TableVirtualKey,
 	budgetsToAdd, budgetsToUpdate []configstoreTables.TableBudget,
 	modelConfigsToAdd, modelConfigsToUpdate []configstoreTables.TableModelConfig,
+	tierRequestLimitsOnly []string,
 ) (governedConfigEntities, error) {
 	governed := governedConfigEntities{
 		customers:                 map[string]bool{},
@@ -11036,6 +12228,17 @@ func governedEntitiesInConfig(
 	for _, teams := range [][]configstoreTables.TableTeam{teamsToAdd, teamsToUpdate} {
 		for i := range teams {
 			teamCandidates[teams[i].ID] = len(teams[i].Budgets) > 0 || teams[i].RateLimit != nil
+		}
+	}
+	// A request limit the file writes for a team or customer is a limit of its own too.
+	for _, rateLimits := range [][]configstoreTables.TableRateLimit{rateLimitsToAdd, rateLimitsToUpdate} {
+		for i := range rateLimits {
+			if rateLimits[i].TeamID != nil {
+				teamCandidates[*rateLimits[i].TeamID] = true
+			}
+			if rateLimits[i].CustomerID != nil {
+				customerCandidates[*rateLimits[i].CustomerID] = true
+			}
 		}
 	}
 	if config.GovernanceConfig != nil {
@@ -11107,6 +12310,10 @@ func governedEntitiesInConfig(
 	for i := range savedKeys {
 		candidates[savedKeys[i].ID] = true
 	}
+	// A key whose only change is its tier's request limit writes to that tier as well.
+	for _, vkID := range tierRequestLimitsOnly {
+		candidates[vkID] = true
+	}
 	providerConfigOfFile := map[uint]string{}
 	for i := range keysInConfigJSON {
 		vk := &keysInConfigJSON[i]
@@ -11154,12 +12361,19 @@ func governedEntitiesInConfig(
 	for _, modelConfig := range slices.Concat(modelConfigsToAdd, modelConfigsToUpdate) {
 		writingModelConfig[modelConfig.ID] = true
 	}
+	// A request limit written for a model config is a limit of its own, even when the model config is kept.
+	writingModelConfigRequestLimit := map[string]bool{}
+	for _, rateLimit := range slices.Concat(rateLimitsToAdd, rateLimitsToUpdate) {
+		if rateLimit.ModelConfigID != nil {
+			writingModelConfigRequestLimit[*rateLimit.ModelConfigID] = true
+		}
+	}
 	for i := range modelConfigsInConfigJSON {
 		modelConfig := &modelConfigsInConfigJSON[i]
 		if modelConfig.Scope != configstoreTables.ModelConfigScopeVirtualKey || modelConfig.ScopeID == nil {
 			continue
 		}
-		linked := writingModelConfig[modelConfig.ID] || writingModelConfigBudget[modelConfig.ID] ||
+		linked := writingModelConfig[modelConfig.ID] || writingModelConfigBudget[modelConfig.ID] || writingModelConfigRequestLimit[modelConfig.ID] ||
 			(modelConfig.RateLimitID != nil && writing[*modelConfig.RateLimitID])
 		for _, id := range modelConfig.BudgetIDs {
 			linked = linked || writingBudget[id]

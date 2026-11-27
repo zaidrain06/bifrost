@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/maximhq/bifrost/core/schemas"
+	configstoreTables "github.com/maximhq/bifrost/framework/configstore/tables"
 	"github.com/maximhq/bifrost/framework/featureflags"
 	"github.com/maximhq/bifrost/framework/livestore"
 	"github.com/stretchr/testify/require"
@@ -70,7 +71,7 @@ func TestConfigJSONContentPerMode(t *testing.T) {
 		_, team := c.Teams.Get("team-1")
 		_, customer := c.Customers.Get("customer-1")
 		_, budget := c.Budgets.Get("budget-team")
-		_, rateLimit := c.RateLimits.Get("rl-mc")
+		_, rateLimit := c.RateLimits.Get(configstoreTables.LegacyRequestLimitID("rl-mc")) // rl-mc's request limit, split from the legacy row
 		_, modelConfig := c.ModelConfigs.Get("mc-1")
 		_, pricingOverride := c.PricingOverrides.Get("po-1")
 
