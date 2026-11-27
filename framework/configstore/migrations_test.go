@@ -6373,3 +6373,122 @@ func TestUsageResetEpochMigrationLeavesUnknown(t *testing.T) {
 	require.True(t, rate.TokenLastReset.Equal(boundary))
 	require.True(t, rate.RequestLastReset.Equal(boundary.Add(-time.Hour)))
 }
+
+// seedRoutingRule writes a rule and its targets as the store holds them.
+func seedRoutingRule(t *testing.T, db *gorm.DB, rule tables.TableRoutingRule) {
+	t.Helper()
+	require.NoError(t, db.Create(&rule).Error)
+}
+
+// TestMigrationRoutingRulesToModelRouters runs the migration on a database: the rules stored there
+// become the routers the mapping gives, the routers already there keep their place after them, the
+// rules are left as they were, and a second run changes nothing.
+func TestMigrationRoutingRulesToModelRouters(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("a database with no rules is left as it is", func(t *testing.T) {
+		store, db := setupFullMigrationDB(t)
+		require.NoError(t, store.CreateModelRouter(ctx, testModelRouter("existing", "Existing")))
+		require.NoError(t, migrationRoutingRulesToModelRouters(ctx, db, testMigrationLogger))
+		routers, err := store.GetModelRouters(ctx)
+		require.NoError(t, err)
+		require.Len(t, routers, 1)
+	})
+
+	t.Run("rules become routers", func(t *testing.T) {
+		store, db := setupFullMigrationDB(t)
+		settings := testSessionAnalyzerConfig()
+		require.NoError(t, store.UpdateComplexityAnalyzerConfig(ctx, settings))
+		existing := testModelRouterWithRouting("existing", "Existing", ModelRouterRouting{Enabled: true, Scope: "global", Priority: 1})
+		require.NoError(t, store.CreateModelRouter(ctx, existing))
+		require.NoError(t, store.SetModelRouterTargets(ctx, "existing", testModelRouterTargets()))
+
+		pinned := migrationRuleTarget("azure", "gpt-4o", 1)
+		pinned.KeyID = bifrost.Ptr("azure-key")
+		pinned.TTFTTimeoutMs = bifrost.Ptr(2000)
+		copied := scopedMigrationRule(migrationRule("support rule/1", `headers["X-App"] == "support"`, 0, pinned), "team", "team-1")
+		copied.Description = "Support traffic"
+		copied.ChainRule = true
+		require.NoError(t, json.Unmarshal([]byte(`["anthropic/claude-sonnet","openai/"]`), &copied.ParsedFallbacks))
+		copied.ParsedQuery = map[string]any{"combinator": "and", "rules": []any{}}
+		rules := []tables.TableRoutingRule{
+			copied,
+			migrationRule("simple", `complexity_tier == "SIMPLE"`, 0, migrationRuleTarget("openai", "gpt-4o-mini", 0.5), migrationRuleTarget("groq", "llama", 0.5)),
+			migrationRule("complex", `complexity_tier == "COMPLEX"`, 1, migrationRuleTarget("anthropic", "claude-opus", 1)),
+			migrationRule("pro", `headers["x-plan"] == "pro" || complexity_tier == "MEDIUM"`, 2, migrationRuleTarget("openai", "gpt-4o", 1)),
+			migrationRule("off", `model == "o3"`, 3, migrationRuleTarget("openai", "o3-mini", 1)),
+			migrationRule("broken", `model ==`, 4, migrationRuleTarget("openai", "gpt-4o", 1)),
+		}
+		rules[4].Enabled = bifrost.Ptr(false)
+		rules[1].ParsedQuery = map[string]any{"combinator": "and", "rules": []any{map[string]any{"field": "complexity_tier", "operator": "=", "value": "SIMPLE"}}}
+		for _, rule := range rules {
+			seedRoutingRule(t, db, rule)
+		}
+
+		// What the mapping gives for the rows as they are stored.
+		var stored []tables.TableRoutingRule
+		require.NoError(t, db.Preload("Targets").Order("id").Find(&stored).Error)
+		before, err := store.GetModelRouters(ctx)
+		require.NoError(t, err)
+		saved, err := store.GetComplexityAnalyzerConfig(ctx)
+		require.NoError(t, err)
+		want, err := ModelRoutersFromRoutingRules(stored, saved, before)
+		require.NoError(t, err)
+
+		require.NoError(t, migrationRoutingRulesToModelRouters(ctx, db, testMigrationLogger))
+
+		routers, err := store.GetModelRouters(ctx)
+		require.NoError(t, err)
+		byID := make(map[string]ModelRouter, len(routers))
+		for _, router := range routers {
+			byID[router.ID] = router
+		}
+		require.Len(t, routers, len(want.Routers)+1, "every mapped router is stored beside the one that was there")
+		for _, mapped := range want.Routers {
+			got, ok := byID[mapped.ID]
+			require.True(t, ok, "router %q was not stored", mapped.ID)
+			assert.Equal(t, mapped.Name, got.Name, mapped.ID)
+			assert.Equal(t, mapped.Description, got.Description, mapped.ID)
+			assert.Equal(t, mapped.Mode, got.Mode, mapped.ID)
+			assert.Equal(t, mapped.OriginRuleID, got.OriginRuleID, mapped.ID)
+			assert.Equal(t, mapped.Routing, got.Routing, mapped.ID)
+			assert.ElementsMatch(t, describeModelRouterTargets(mapped.Targets), describeModelRouterTargets(got.Targets), mapped.ID)
+			if mapped.Mode == tables.ModelRouterModeClassifier {
+				assert.Equal(t, mapped.ComplexityAnalyzerConfig, got.ComplexityAnalyzerConfig, mapped.ID)
+			}
+		}
+
+		// The rule copied as it was: an id with a space and a slash, a key, a deadline, fallbacks.
+		support := byID["support rule/1"]
+		assert.Equal(t, `headers["X-App"] == "support"`, support.Routing.CelExpression)
+		assert.Equal(t, map[string]any{"combinator": "and", "rules": []any{}}, support.Routing.Query)
+		require.Len(t, support.Targets, 1)
+		assert.Equal(t, 2000, *support.Targets[0].TTFTTimeoutMs)
+		assert.Equal(t, []string{"anthropic/claude-sonnet", "openai/"}, tables.RoutingFallbackStrings(support.Targets[0].ParsedFallbacks))
+		// Two tier rules next to each other are one router; the split rule is two.
+		assert.ElementsMatch(t, []string{"SIMPLE openai/gpt-4o-mini@ 0.5", "SIMPLE groq/llama@ 0.5", "COMPLEX anthropic/claude-opus@ 1"}, describeModelRouterTargets(byID["simple"].Targets))
+		assert.NotContains(t, byID, "complex")
+		assert.Equal(t, map[string]any{"combinator": "and", "rules": []any{}}, byID["simple"].Routing.Query, "a tier rule made in the builder opens in the builder, without the tier")
+		assert.Equal(t, "pro", byID["pro-2"].OriginRuleID)
+		simple := byID["simple"]
+		assert.True(t, simple.SessionRoutingEnabled(), "session memory is part of the settings a router is given")
+		assert.False(t, byID["off"].Routing.Enabled)
+		assert.NotContains(t, byID, "broken")
+
+		// The router that was there keeps everything but its priority, which the rules took.
+		kept := byID["existing"]
+		assert.Greater(t, kept.Routing.Priority, byID["off"].Routing.Priority)
+		assert.ElementsMatch(t, describeModelRouterTargets(testModelRouterTargets()), describeModelRouterTargets(kept.Targets))
+
+		var remaining, targets int64
+		require.NoError(t, db.Model(&tables.TableRoutingRule{}).Count(&remaining).Error)
+		require.NoError(t, db.Model(&tables.TableRoutingTarget{}).Count(&targets).Error)
+		assert.EqualValues(t, len(rules), remaining, "the rules are left for a release that still has them")
+		assert.EqualValues(t, 7, targets)
+
+		require.NoError(t, migrationRoutingRulesToModelRouters(ctx, db, testMigrationLogger))
+		again, err := store.GetModelRouters(ctx)
+		require.NoError(t, err)
+		assert.Len(t, again, len(routers), "a second run makes no router")
+	})
+}
