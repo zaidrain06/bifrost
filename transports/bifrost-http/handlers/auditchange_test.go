@@ -823,8 +823,17 @@ func TestCommitPoint_GovernanceCreates(t *testing.T) {
 				if !tc.childRows {
 					return
 				}
-				rl, _ := after["rate_limit"].(map[string]any)
-				if rl == nil || rl["request_max_limit"] != float64(7) {
+				// A legacy rate_limit carrying only request fields is saved as a request limit.
+				saved := false
+				if rl, _ := after["rate_limit"].(map[string]any); rl != nil && rl["request_max_limit"] == float64(7) {
+					saved = true
+				}
+				if rules, _ := after["request_limits"].([]any); len(rules) == 1 {
+					if rule, _ := rules[0].(map[string]any); rule != nil && rule["request_max_limit"] == float64(7) {
+						saved = true
+					}
+				}
+				if !saved {
 					t.Fatalf("after snapshot missing the saved rate limit: %s", change.After)
 				}
 				if tc.name == "virtual key" {
