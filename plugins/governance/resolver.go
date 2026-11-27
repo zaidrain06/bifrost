@@ -229,6 +229,10 @@ func (r *BudgetResolver) evaluateLimits(ctx *schemas.BifrostContext, evaluationR
 		modelBudgets, modelRateLimits := r.store.GlobalModelLimits(ctx, evaluationRequest.Provider, evaluationRequest.Model)
 		budgets = append(budgets, modelBudgets...)
 		rateLimits = append(rateLimits, modelRateLimits...)
+		// Filtered by scope as settled limits are (see resolveLimitsWith).
+		isMCP := evaluationRequest.RequestType == schemas.MCPToolExecutionRequest
+		budgets = BudgetsForRequestKind(ctx, r.store, budgets, isMCP)
+		rateLimits = RateLimitsForRequestKind(ctx, r.store, rateLimits, isMCP)
 	}
 
 	// Rate limits before budgets, as they always have been: a rate limit refuses a request that

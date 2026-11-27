@@ -2124,14 +2124,15 @@ func (gs *LocalGovernanceStore) CollectTeamBudgets(ctx context.Context, teamID s
 	return gs.loadBudgets(ctx, team.BudgetIDs)
 }
 
-// CollectTeamRateLimits returns the live rate limit a team holds (at most one), or nil when the team
-// is unknown or holds none. Exported for the same reason as CollectTeamBudgets.
+// CollectTeamRateLimits returns the live rate limits a team holds (its rate limit and the request
+// limits it owns), or nil when the team is unknown or holds none. Exported for the same reason as
+// CollectTeamBudgets.
 func (gs *LocalGovernanceStore) CollectTeamRateLimits(ctx context.Context, teamID string) []*configstoreTables.TableRateLimit {
 	team, ok := gs.live.Collections.Teams.Get(teamID)
 	if !ok {
 		return nil
 	}
-	return gs.loadRateLimits(ctx, team.RateLimitID)
+	return gs.loadRateLimits(ctx, rateLimitIDsOf(team.RateLimitID, team.RequestLimitIDs)...)
 }
 
 // CollectCustomerBudgets returns the live budgets a customer holds, or nil when the customer is
@@ -2144,14 +2145,14 @@ func (gs *LocalGovernanceStore) CollectCustomerBudgets(ctx context.Context, cust
 	return gs.loadBudgets(ctx, customer.BudgetIDs)
 }
 
-// CollectCustomerRateLimits returns the live rate limit a customer holds (at most one), or nil when
-// the customer is unknown or holds none.
+// CollectCustomerRateLimits returns the live rate limits a customer holds (its rate limit and the
+// request limits it owns), or nil when the customer is unknown or holds none.
 func (gs *LocalGovernanceStore) CollectCustomerRateLimits(ctx context.Context, customerID string) []*configstoreTables.TableRateLimit {
 	customer, ok := gs.live.Collections.Customers.Get(customerID)
 	if !ok {
 		return nil
 	}
-	return gs.loadRateLimits(ctx, customer.RateLimitID)
+	return gs.loadRateLimits(ctx, rateLimitIDsOf(customer.RateLimitID, customer.RequestLimitIDs)...)
 }
 
 // loadBudgets returns the live budgets with these IDs, leaving out any this store does not hold,
@@ -2166,16 +2167,19 @@ func (gs *LocalGovernanceStore) loadBudgets(ctx context.Context, ids []string) [
 	return list
 }
 
-// loadRateLimits returns the live rate limit with this ID as a list, or nil for "" or one this
-// store does not hold.
-func (gs *LocalGovernanceStore) loadRateLimits(ctx context.Context, id string) []*configstoreTables.TableRateLimit {
-	if id == "" {
-		return nil
+// loadRateLimits returns the live rate limits with these IDs, leaving out "" and any this store does
+// not hold, or nil when none is held.
+func (gs *LocalGovernanceStore) loadRateLimits(ctx context.Context, ids ...string) []*configstoreTables.TableRateLimit {
+	var list []*configstoreTables.TableRateLimit
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if rl := gs.LoadRateLimit(ctx, id); rl != nil {
+			list = append(list, rl)
+		}
 	}
-	if rl := gs.LoadRateLimit(ctx, id); rl != nil {
-		return []*configstoreTables.TableRateLimit{rl}
-	}
-	return nil
+	return list
 }
 
 // organizationLimitsForVirtualKey collects the limits a key answers to because of where it sits in
@@ -2191,7 +2195,7 @@ func (gs *LocalGovernanceStore) organizationLimitsForVirtualKey(ctx context.Cont
 	org := keyOrganizationOf(gs.live, vk)
 	if org.team != nil {
 		budgets = append(budgets, grant.LimitsHeldBy(grant.LimitHolderTeam, org.team.ID, org.team.Name, "", "", org.team.BudgetIDs...)...)
-		rateLimits = append(rateLimits, grant.LimitsHeldBy(grant.LimitHolderTeam, org.team.ID, org.team.Name, "", "", idList(org.team.RateLimitID)...)...)
+		rateLimits = append(rateLimits, grant.LimitsHeldBy(grant.LimitHolderTeam, org.team.ID, org.team.Name, "", "", rateLimitIDsOf(org.team.RateLimitID, org.team.RequestLimitIDs)...)...)
 	}
 
 	customer := org.customer
@@ -2208,7 +2212,7 @@ func (gs *LocalGovernanceStore) organizationLimitsForVirtualKey(ctx context.Cont
 	}
 	if customer != nil {
 		budgets = append(budgets, grant.LimitsHeldBy(grant.LimitHolderCustomer, customer.ID, customer.Name, "", "", customer.BudgetIDs...)...)
-		rateLimits = append(rateLimits, grant.LimitsHeldBy(grant.LimitHolderCustomer, customer.ID, customer.Name, "", "", idList(customer.RateLimitID)...)...)
+		rateLimits = append(rateLimits, grant.LimitsHeldBy(grant.LimitHolderCustomer, customer.ID, customer.Name, "", "", rateLimitIDsOf(customer.RateLimitID, customer.RequestLimitIDs)...)...)
 	}
 	return budgets, rateLimits
 }
@@ -2222,6 +2226,21 @@ func idList(id string) []string {
 		return nil
 	}
 	return []string{id}
+}
+
+// rateLimitIDsOf lists a holder's rate limit (Max Tokens, or a legacy combined row) followed by the
+// request limits it owns. A holder with no request limits costs what idList does, and one with no
+// rate limit hands back its record's list, which callers only read.
+func rateLimitIDsOf(rateLimitID string, requestLimitIDs []string) []string {
+	if len(requestLimitIDs) == 0 {
+		return idList(rateLimitID)
+	}
+	if rateLimitID == "" {
+		return requestLimitIDs
+	}
+	ids := make([]string, 0, len(requestLimitIDs)+1)
+	ids = append(ids, rateLimitID)
+	return append(ids, requestLimitIDs...)
 }
 
 // checkRateLimit reports whether one rate limit, held by the named entity, is exhausted once the
@@ -3694,9 +3713,11 @@ func (gs *LocalGovernanceStore) CollectModelScopedGovernanceIDs(ctx context.Cont
 				seenBudgets[id] = true
 			}
 		}
-		if mc.RateLimitID != "" && !seenRateLimits[mc.RateLimitID] {
-			rateLimitIDs = append(rateLimitIDs, mc.RateLimitID)
-			seenRateLimits[mc.RateLimitID] = true
+		for _, id := range rateLimitIDsOf(mc.RateLimitID, mc.RequestLimitIDs) {
+			if !seenRateLimits[id] {
+				rateLimitIDs = append(rateLimitIDs, id)
+				seenRateLimits[id] = true
+			}
 		}
 	}
 
@@ -3874,8 +3895,9 @@ func (gs *LocalGovernanceStore) GatherLimitsForRequestKind(ctx *schemas.BifrostC
 // limit among them. A request with no access still answers to the deployment's own limits.
 func (gs *LocalGovernanceStore) GetBudgetAndRateLimitStatus(ctx *schemas.BifrostContext, provider schemas.ModelProvider, model string, budgetBaselines map[string]float64, tokenBaselines map[string]int64, requestBaselines map[string]int64) *BudgetAndRateLimitStatus {
 	budgets, rateLimits, _ := gs.GatherLimitsForRequestKind(ctx, ctx.Grant().Access(), provider, model, false)
-	// Status describes a model request for the pair, so an MCP-only budget must not steer it.
+	// Status describes a model request for the pair, so MCP-only limits must not steer it.
 	budgets = BudgetsForRequestKind(ctx, gs, budgets, false)
+	rateLimits = RateLimitsForRequestKind(ctx, gs, rateLimits, false)
 	status := &BudgetAndRateLimitStatus{}
 
 	for _, limit := range budgets {
@@ -3976,7 +3998,7 @@ func (gs *LocalGovernanceStore) providerScopedModelLimitsInScopes(ctx context.Co
 				continue
 			}
 			budgets = append(budgets, grant.LimitsHeldBy(scope.kind, mc.ID, modelConfigDisplayName(mc), providerName, model, mc.BudgetIDs...)...)
-			rateLimits = append(rateLimits, grant.LimitsHeldBy(scope.kind, mc.ID, modelConfigDisplayName(mc), providerName, model, idList(mc.RateLimitID)...)...)
+			rateLimits = append(rateLimits, grant.LimitsHeldBy(scope.kind, mc.ID, modelConfigDisplayName(mc), providerName, model, rateLimitIDsOf(mc.RateLimitID, mc.RequestLimitIDs)...)...)
 		}
 	}
 	return budgets, rateLimits
@@ -4002,7 +4024,7 @@ func (gs *LocalGovernanceStore) modelLimitsInScopes(ctx context.Context, scopes 
 				continue
 			}
 			budgets = append(budgets, grant.LimitsHeldBy(scope.kind, mc.ID, modelConfigDisplayName(mc), providerName, model, mc.BudgetIDs...)...)
-			rateLimits = append(rateLimits, grant.LimitsHeldBy(scope.kind, mc.ID, modelConfigDisplayName(mc), providerName, model, idList(mc.RateLimitID)...)...)
+			rateLimits = append(rateLimits, grant.LimitsHeldBy(scope.kind, mc.ID, modelConfigDisplayName(mc), providerName, model, rateLimitIDsOf(mc.RateLimitID, mc.RequestLimitIDs)...)...)
 		}
 	}
 	return budgets, rateLimits
@@ -4067,7 +4089,7 @@ func (gs *LocalGovernanceStore) holderLevelLimits(scope limitScope) ([]schemas.L
 	}
 	name := modelConfigDisplayName(mc)
 	return grant.LimitsHeldBy(scope.kind, mc.ID, name, "", "", mc.BudgetIDs...),
-		grant.LimitsHeldBy(scope.kind, mc.ID, name, "", "", idList(mc.RateLimitID)...)
+		grant.LimitsHeldBy(scope.kind, mc.ID, name, "", "", rateLimitIDsOf(mc.RateLimitID, mc.RequestLimitIDs)...)
 }
 
 // permitModelLimits is PermitModelLimits with the alias targets already resolved.
@@ -4223,6 +4245,10 @@ func (gs *LocalGovernanceStore) CheckRateLimits(ctx context.Context, limits []sc
 			continue
 		}
 		rateLimit := rateLimitView(settings, st)
+		if limit.RequestsOnly {
+			// Max Tokens is model-only: a tool call answers to a combined row's request limit alone.
+			rateLimit.TokenMaxLimit = nil
+		}
 		if decision, err := gs.checkRateLimit(limitLabel(limit), &rateLimit, tokensBaselines, requestsBaselines, sessionContinuation, now); err != nil {
 			return decision, err
 		}
